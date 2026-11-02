@@ -1,8 +1,10 @@
 # Pocket Financer Android development instructions
 
 Read `AGENTS.md` first. For SMS work, also read
-`docs/sms-processing-next-steps.md` and the canonical documents in the sibling
-`pocket-financer-intelligence` repository:
+`docs/sms-processing-next-steps.md` and the canonical documents in the shared
+`pocket-financer-intelligence` repository. Its Windows/WSL locations and the
+approved access procedure are in this repo's `AGENTS.md`; do not assume a sibling
+checkout:
 
 - `docs/architecture/SMS_PROCESSING_ARCHITECTURE.md`
 - `docs/plans/CROSS_PLATFORM_SMS_ROADMAP.md`
@@ -16,9 +18,13 @@ is advisory evidence, not a terminal allowlist. The host owns strict parsing,
 Unicode-scalar grounding, exact minor units, account resolution, duplicates,
 receipt time, persistence, durable operation ownership, review, and recovery.
 
-The current native v4 path is review-only. Complete valid v4 results still go to
-Review. Direct-to-Transactions routing is planned for an additive successor
-contract and must not be retrofitted into frozen v1-v4 behavior.
+Current operations use the implemented v5/v6 successor automatic-routing policy.
+Complete valid posted results with one existing account and a clear duplicate
+assessment can be saved atomically under the automatic-processing opt-in, which
+defaults off. Exceptions enter Review. V6 captures the operation's grammar
+choice; structural analysis and triage still lead eligible messages to the local
+SLM extractor. Stored v4 operations and original-configuration retries remain
+review-only; never retrofit successor behavior into frozen v1-v4 operations.
 
 ## Repository responsibilities
 

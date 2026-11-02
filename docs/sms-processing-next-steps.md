@@ -1,7 +1,8 @@
 # Android SMS processing next steps
 
 Status: **Android gates and synthetic Pixel_9 retry/recovery checks passed; model-driven automatic save and physical-device verification pending**
-Last reconciled: 2026-09-25
+Last runtime checkpoint: 2026-09-25
+Source/guidance reconciliation: 2026-10-05 (no new emulator or device run)
 
 ## Direct-only SMS output invariant
 
@@ -40,6 +41,13 @@ atomically; valid `none` settles without a transaction; exceptions enter Review.
 The frozen v4 path remains `review_only` for its existing operations and
 original-configuration retries.
 
+Current snapshots also bind `native-integration-v6` / `processing-config/6`
+when they capture an explicit grammar choice. `PipelineService` passes the
+current GBNF preference once to `SmsV5OperationSnapshotFactory`; the snapshot
+persists the matching release/configuration and runtime parameters. A null
+grammar choice preserves the frozen v5 binding. This source behavior is
+implemented; it does not close the model-driven save or device gates.
+
 Implemented in `fcf6614`:
 
 - hash verification for the shared automatic contract bundle;
@@ -75,11 +83,14 @@ described as reasoning. Manual updates are fenced by run, candidate, and exact
 attempt; automatic updates retain exact claim fencing. Terminal, cancellation,
 stale-owner, and lifecycle paths scrub private transient text.
 
-## 2026-09-24 emulator feedback and active fix plan
+## 2026-09-24 emulator feedback (historical requested behavior)
 
 The owner tested the current PR on the emulator and found that the Review flow is
 still difficult to use. This section records the requested behavior; earlier
 checkpoints below remain dated evidence, not acceptance of this UX.
+The list preserves the request made on that date. Grammar setting capture is now
+implemented through the v6 source binding described above; use the open
+observations and verification sections for the remaining acceptance work.
 
 1. Show the model's output growing live in one readable area. Remove the
    separate "Latest decoded token delta" card. Keep decoded-token callbacks and
@@ -193,8 +204,9 @@ Host GGUF evidence is not Android runtime evidence.
    live decoding, process death, accessibility, memory, latency, thermal, and
    battery behavior.
 
-Do not enable rollout or describe the full SMS implementation as complete until
-the shared evaluation strategy and physical-device gates pass.
+Keep the implemented automatic-processing preference opt-in and off by default.
+Do not broaden that default or describe the full SMS implementation as complete
+until the shared evaluation strategy and physical-device gates pass.
 
 ## 2026-09-22 handoff checkpoint
 
