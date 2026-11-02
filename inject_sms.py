@@ -1,8 +1,10 @@
+import argparse
 import json
 import os
+import random
 import subprocess
 import time
-import random
+from pathlib import Path
 
 def detect_devices():
     """Run `adb devices` and parse connected device serial numbers."""
@@ -30,8 +32,20 @@ def shell_escape(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 def main():
-    dataset_path = r"d:\Personal_Projects\pF_slm_selection\DATA\extraction_ds.jsonl"
-    if not os.path.exists(dataset_path):
+    parser = argparse.ArgumentParser(
+        description="Inject SMS fixtures; connected emulator inboxes will be cleared."
+    )
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=(
+            Path(__file__).resolve().parent.parent
+            / "pocket-financer-intelligence" / "DATA" / "extraction_ds.jsonl"
+        ),
+        help="JSONL dataset (default: the sibling pocket-financer-intelligence checkout)",
+    )
+    dataset_path = parser.parse_args().dataset.expanduser()
+    if not dataset_path.is_file():
         print(f"Error: Dataset not found at {dataset_path}")
         return
         

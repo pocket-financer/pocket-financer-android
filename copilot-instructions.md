@@ -2,7 +2,7 @@
 
 Read `AGENTS.md` first. For SMS work, also read
 `docs/sms-processing-next-steps.md` and the canonical documents in the sibling
-`pF_slm_selection` repository:
+`pocket-financer-intelligence` repository:
 
 - `docs/architecture/SMS_PROCESSING_ARCHITECTURE.md`
 - `docs/plans/CROSS_PLATFORM_SMS_ROADMAP.md`

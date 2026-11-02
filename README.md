@@ -198,7 +198,12 @@ Run the Python script in the workspace root to inject exactly 20 test SMS messag
 ```powershell
 python inject_sms.py
 ```
-This utility automatically configures shell appops permissions (`WRITE_SMS`) and restarts the Android Messages application to refresh the inbox view.
+By default, the utility reads `DATA/extraction_ds.jsonl` from a sibling
+`pocket-financer-intelligence` checkout. For another location, pass
+`--dataset /path/to/extraction_ds.jsonl`. It configures shell appops permissions
+(`WRITE_SMS`) and restarts the Android Messages application. **It clears the SMS
+inbox on connected emulators before injecting messages**; do not run it against
+an emulator containing messages you need to keep.
 
 ### 2. Replay First Run
 To test the onboarding sync visual elements repeatedly:
@@ -223,4 +228,4 @@ reconsidered in the future.
 ## 🤝 Acknowledgments
 
 *   [llama.cpp](https://github.com/ggerganov/llama.cpp) — Core engine powering local, on-device SLM execution.
-*   The SLM Evaluation Pipeline ([`pF_slm_selection`](https://github.com/ManishAradwad/pF_slm_selection)) which identified the best Small Language Models for this app.
+*   [Pocket Financer Intelligence](https://github.com/pocket-financer/pocket-financer-intelligence) — shared SMS contracts, evaluation, and model research.
