@@ -2,8 +2,9 @@
 
 Read `AGENTS.md` first. For SMS work, also read
 `docs/sms-processing-next-steps.md` and the canonical documents in the shared
-`pF_slm_selection` repository. Its Windows/WSL locations and the approved access
-procedure are in this repo's `AGENTS.md`; do not assume a sibling checkout:
+`pocket-financer-intelligence` repository. Its Windows/WSL locations and the
+approved access procedure are in this repo's `AGENTS.md`; do not assume a sibling
+checkout:
 
 - `docs/architecture/SMS_PROCESSING_ARCHITECTURE.md`
 - `docs/plans/CROSS_PLATFORM_SMS_ROADMAP.md`

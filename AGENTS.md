@@ -14,6 +14,10 @@ For PocketFinancer work on this workstation, use these existing checkouts:
 | Android | `D:\Personal_Projects\pocket-financer\pocket-financer-android` | Windows Git, PowerShell, `gradlew.bat` |
 | iOS | `D:\Personal_Projects\pocket-financer\pocket-financer-ios` | Windows Git for local edits; macOS/Xcode for builds and devices |
 
+The shared GitHub repository is now named `pocket-financer-intelligence`. The
+workstation path above records the existing checkout's former directory name;
+verify it before moving any private workspace.
+
 Read each target repo's `AGENTS.md` and respect the active task scope and workspace
 permissions. If a Windows sandbox denies WSL with `E_ACCESSDENIED`, start the
 execution tool from `C:\Users\manis`, then use its supported sandbox-escalation

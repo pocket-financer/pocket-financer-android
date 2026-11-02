@@ -18,7 +18,7 @@ produce direct JSON is ineligible for this path; no thinking fallback is used.
 The synthetic Qwen3 emulator diagnostic and focused JVM tests cover this boundary.
 A separate physical-device and broader model matrix remains open.
 
-The shared repository `pF_slm_selection` owns the canonical architecture,
+The shared repository `pocket-financer-intelligence` owns the canonical architecture,
 versioned contracts, sanitized vectors, host GGUF evaluation, native-trace import,
 and the planned Android/iOS native scoring lanes. This repository owns the
 Windows/Gradle, Kotlin/JNI, Room, Compose, emulator, and Android-device
@@ -184,7 +184,7 @@ last completed stage on the unchanged SMS body.
 
 ## Shared evaluation lane
 
-`pF_slm_selection` already provides the host GGUF evaluator and encrypted
+`pocket-financer-intelligence` already provides the host GGUF evaluator and encrypted
 native-trace import. A dedicated Android native evaluator/scorer is still planned.
 It will run the exact app contract and model on emulator/device, export a
 provenance-bound encrypted trace bundle, and score aggregate contract, model,

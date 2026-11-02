@@ -5,7 +5,7 @@ import javax.inject.Singleton
 
 /**
  * Deterministic multi-stage SMS filtering pipeline to identify transactional messages.
- * Ported from the Python `new_pipeline.py` implementation in `pF_slm_selection`.
+ * Ported from the Python `new_pipeline.py` implementation in `pocket-financer-intelligence`.
  */
 @Singleton
 class SmsFilterPipeline @Inject constructor() {
