@@ -71,29 +71,4 @@ class PromptBuilder @Inject constructor(
         return sb.toString()
     }
 
-    /**
-     * Manual chat template rendering (fallback when the model's Jinja template
-     * is unavailable).
-     *
-     * Qwen3 requires chat template rendering with enable_thinking=True for the
-     * thinking pass. When the model doesn't have a built-in template, we fall
-     * back to the standard Qwen3 format. The primary path is
-     * the runtime's native chat-template operation.
-     */
-    fun buildChatPrompt(rawPrompt: String, enableThinking: Boolean = true): String {
-        val systemMsg = "You are a helpful financial SMS extraction assistant."
-        return buildString {
-            append("<|im_start|>system\n")
-            append(systemMsg)
-            if (enableThinking) {
-                append("\n\nPlease think through this step by step inside <think> tags before giving your final answer.")
-            }
-            append("<|im_end|>\n")
-            append("<|im_start|>user\n")
-            append(rawPrompt)
-            append("<|im_end|>\n")
-            append("<|im_start|>assistant\n")
-            // The engine appends "<think>\n" in phase 1 and "</think>\n" between phases
-        }
-    }
 }

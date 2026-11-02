@@ -16,6 +16,7 @@ FetchContent_Declare(
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "")
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "")
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "")
+set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS    OFF CACHE BOOL "")
 set(LLAMA_STANDALONE     ON  CACHE BOOL "")
 
@@ -50,6 +51,7 @@ target_include_directories(pocketfinancer_llm PRIVATE
 
 target_link_libraries(pocketfinancer_llm
     llama
+    llama-common
     ggml
     ggml-base
     log

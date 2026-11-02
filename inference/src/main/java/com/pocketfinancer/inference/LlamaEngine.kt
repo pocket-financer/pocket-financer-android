@@ -75,7 +75,7 @@ internal class LlamaEngine(
                 handle = handle,
                 operationId = operationId,
                 messages = request.messages
-            ) ?: request.fallbackPrompt
+            ) ?: throw IllegalStateException("non_thinking_template_unavailable")
 
             if (wasStopped(handle, operationId)) {
                 return SlmExtractionResult.Stopped(spec)
@@ -92,23 +92,13 @@ internal class LlamaEngine(
                 return SlmExtractionResult.Stopped(spec)
             }
 
-            if (spec.hasThinkingMode) {
-                inferThinking(
-                    handle = handle,
-                    operationId = operationId,
-                    spec = spec,
-                    request = request,
-                    prepared = prepared
-                )
-            } else {
-                inferDirect(
-                    handle = handle,
-                    operationId = operationId,
-                    spec = spec,
-                    request = request,
-                    prepared = prepared
-                )
-            }
+            inferDirect(
+                handle = handle,
+                operationId = operationId,
+                spec = spec,
+                request = request,
+                prepared = prepared
+            )
         } catch (failure: Throwable) {
             if (wasStopped(handle, operationId)) {
                 SlmExtractionResult.Stopped(spec)
@@ -146,49 +136,6 @@ internal class LlamaEngine(
         return handle != 0L && nativeStop(handle, operationId)
     }
 
-    private fun inferThinking(
-        handle: Long,
-        operationId: Long,
-        spec: SlmModelSpec,
-        request: SlmExtractionRequest,
-        prepared: PreparedPrompt
-    ): SlmExtractionResult {
-        val thinkingPrompt = prepared.remainingPrompt + "<think>\n"
-        nativeCompletion(
-            handle = handle,
-            operationId = operationId,
-            prompt = thinkingPrompt,
-            grammar = null,
-            nPredict = request.thinkingTokens,
-            temperature = 0.0f,
-            stop = "</think>",
-            keepCache = prepared.keepCache,
-            callback = request.thinkingCallback
-        )
-        if (wasStopped(handle, operationId)) {
-            return SlmExtractionResult.Stopped(spec)
-        }
-
-        val answer = nativeCompletion(
-            handle = handle,
-            operationId = operationId,
-            prompt = "</think>\n",
-            grammar = request.grammar,
-            nPredict = request.answerTokens,
-            temperature = 0.0f,
-            stop = null,
-            keepCache = true,
-            callback = request.jsonCallback
-        )
-        return extractionResult(
-            handle = handle,
-            operationId = operationId,
-            spec = spec,
-            answer = answer,
-            cache = prepared.diagnostics
-        )
-    }
-
     private fun inferDirect(
         handle: Long,
         operationId: Long,
@@ -205,7 +152,8 @@ internal class LlamaEngine(
             temperature = 0.0f,
             stop = null,
             keepCache = prepared.keepCache,
-            callback = request.jsonCallback ?: request.thinkingCallback
+            callback = request.jsonCallback,
+            requireJsonObjectStart = true
         )
         return extractionResult(
             handle = handle,
@@ -308,7 +256,8 @@ internal class LlamaEngine(
                 temperature = 0.0f,
                 stop = null,
                 keepCache = false,
-                callback = null
+                callback = null,
+                requireJsonObjectStart = false
             )
             if (!wasStopped(handle, operationId)) {
                 storage.deleteStaleSessions(spec, prefixHash)
@@ -438,7 +387,8 @@ internal class LlamaEngine(
         temperature: Float,
         stop: String?,
         keepCache: Boolean,
-        callback: SlmTokenCallback?
+        callback: SlmTokenCallback?,
+        requireJsonObjectStart: Boolean
     ): String
 
     private external fun nativeApplyChatTemplate(

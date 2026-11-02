@@ -14,9 +14,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import com.pocketfinancer.pipeline.SmsFilterPipeline
-import com.pocketfinancer.pipeline.PromptBuilder
-import com.pocketfinancer.pipeline.PipelineService
-import com.pocketfinancer.pipeline.ExtractionParser
 import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
 import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivity
 import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivityStore
@@ -26,7 +23,6 @@ import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmModelStorage
-import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.setup.SetupImportStore
@@ -112,11 +108,9 @@ internal fun HistoricalSmsProcessingActivity.cardSnapshot(): HistoricalSmsProces
     copy(
         modelName = null,
         grammarEnabled = null,
-        thinkingTokenBudget = 0,
         answerTokenBudget = 0,
-        thinkingOutput = "",
+        decodedTokenDelta = "",
         jsonOutput = "",
-        thinkingOutputTruncated = false,
         jsonOutputTruncated = false,
         performance = null,
         cache = null
@@ -131,11 +125,9 @@ internal fun AutomaticSmsProcessingActivity.cardSnapshot():
     AutomaticSmsProcessingActivity = copy(
         modelName = null,
         grammarEnabled = null,
-        thinkingTokenBudget = 0,
         answerTokenBudget = 0,
-        thinkingOutput = "",
+        decodedTokenDelta = "",
         jsonOutput = "",
-        thinkingOutputTruncated = false,
         jsonOutputTruncated = false,
         performance = null,
         cache = null
@@ -155,16 +147,18 @@ internal fun HomeSyncState.withoutManualSmsTelemetry(): HomeSyncState = copy(
             body = ""
         )
     },
-    thinkingOutput = "",
+    decodedTokenDelta = "",
     jsonOutput = "",
+    jsonOutputTruncated = false,
     activeSmsPerformance = null,
     activeModelName = null
 )
 
 /** Keeps source evidence for a visible card/queue but omits live model output. */
 internal fun HomeSyncState.withoutManualLiveTelemetry(): HomeSyncState = copy(
-    thinkingOutput = "",
+    decodedTokenDelta = "",
     jsonOutput = "",
+    jsonOutputTruncated = false,
     activeSmsPerformance = null,
     activeModelName = null
 )
@@ -178,7 +172,6 @@ private fun sameManualStateOutsideQueueAndTelemetry(
         first.cancellationRequested == second.cancellationRequested &&
         first.currentIndex == second.currentIndex &&
         first.currentStageIndex == second.currentStageIndex &&
-        first.hasThinkingMode == second.hasThinkingMode &&
         first.recentScanOutcome == second.recentScanOutcome &&
         first.recentScanWindowDays == second.recentScanWindowDays &&
         first.lastSuccessfulScanMillis == second.lastSuccessfulScanMillis &&
@@ -275,8 +268,9 @@ internal fun sanitizedManualSyncState(
                 }
                 val snapshot = state.copy(
                     queue = sanitizedQueue,
-                    thinkingOutput = "",
+                    decodedTokenDelta = "",
                     jsonOutput = "",
+                    jsonOutputTruncated = false,
                     activeSmsPerformance = null,
                     activeModelName = null
                 )
@@ -305,8 +299,7 @@ private fun sameHistoricalCardActivity(
         first.date == second.date &&
         first.position == second.position &&
         first.total == second.total &&
-        first.stage == second.stage &&
-        first.hasThinkingMode == second.hasThinkingMode
+        first.stage == second.stage
 }
 
 /** Source-preserving historical card state exists only while Home collects it. */
@@ -341,7 +334,6 @@ private fun sameAutomaticCardActivity(
         first.body == second.body &&
         first.date == second.date &&
         first.stage == second.stage &&
-        first.hasThinkingMode == second.hasThinkingMode &&
         first.detail == second.detail
 }
 
@@ -390,10 +382,7 @@ class HomeViewModel @Inject constructor(
     private val transactionRepository: TransactionRepository,
     private val syncManager: HomeSyncManager,
     private val smsFilterPipeline: SmsFilterPipeline,
-    private val promptBuilder: PromptBuilder,
-    private val slmRuntime: SlmRuntime,
     private val modelStorage: SlmModelStorage,
-    private val extractionParser: ExtractionParser,
     private val deviceCapabilities: DeviceCapabilities,
     private val modelDownloader: ModelDownloader,
     private val onboardingSyncManager: OnboardingSyncManager,
@@ -1086,40 +1075,13 @@ class HomeViewModel @Inject constructor(
         .filterWithDetails(activity.sender, activity.body)
         .logs
 
-    /**
-     * Returns both chat messages passed to the extraction request. Model-
-     * specific chat-template rendering happens inside the local runtime and is
-     * deliberately not reconstructed or claimed here.
-     */
     fun getHistoricalPromptContent(
-        activity: HistoricalSmsProcessingActivity
-    ): String = buildString {
-        appendLine("system:")
-        appendLine(PipelineService.EXTRACTION_SYSTEM_MESSAGE)
-        appendLine()
-        appendLine("user:")
-        append(
-            promptBuilder.buildExtractionPrompt(
-                activity.sender,
-                activity.body
-            )
-        )
-    }
+        @Suppress("UNUSED_PARAMETER") activity: HistoricalSmsProcessingActivity
+    ): String = DECISION_TRACE_MESSAGE
 
     fun getAutomaticPromptContent(
-        activity: AutomaticSmsProcessingActivity
-    ): String = buildString {
-        appendLine("system:")
-        appendLine(PipelineService.EXTRACTION_SYSTEM_MESSAGE)
-        appendLine()
-        appendLine("user:")
-        append(
-            promptBuilder.buildExtractionPrompt(
-                activity.sender,
-                activity.body
-            )
-        )
-    }
+        @Suppress("UNUSED_PARAMETER") activity: AutomaticSmsProcessingActivity
+    ): String = DECISION_TRACE_MESSAGE
 
     fun getKvCacheLogs(item: SyncSmsItem): List<String> {
         if (!item.hasDiagnosticSourceEvidence()) {
@@ -1135,24 +1097,14 @@ class HomeViewModel @Inject constructor(
         if (!item.hasDiagnosticSourceEvidence()) {
             return SOURCE_EVIDENCE_UNAVAILABLE
         }
-        val rawPrompt = promptBuilder.buildExtractionPrompt(
-            item.sender,
-            item.body
-        )
-        val hasThinking = slmRuntime.state.value.loadedModel?.hasThinkingMode ?: true
-        return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
-    }
-
-    fun getParsedOutput(jsonStr: String): String {
-        val parsed = extractionParser.parse(jsonStr)
-        return parsed?.let {
-            "amount=${it.amount}, type=${it.type.name.lowercase()}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
-        } ?: "Parsed: null (non-financial)"
+        return DECISION_TRACE_MESSAGE
     }
 
     private companion object {
         const val SOURCE_EVIDENCE_UNAVAILABLE =
             "Source evidence is unavailable after terminal processing."
+        const val DECISION_TRACE_MESSAGE =
+            "The legacy extraction prompt is no longer used. Open Saved alert reviews to inspect the durable Decision Trace."
         const val APP_SETTINGS = ".app_settings"
         const val KEY_SELECTED_SLM_ID = "selected_slm_id"
     }

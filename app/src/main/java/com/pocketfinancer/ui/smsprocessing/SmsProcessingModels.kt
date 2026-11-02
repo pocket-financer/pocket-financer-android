@@ -310,7 +310,7 @@ fun HomeSyncState.toSmsPipelineCardUiModel(
     val step = if (isStopping) {
         if (currentStageIndex == 3) "Finishing current save" else "Stopping safely"
     } else {
-        manualStepLabel(currentStageIndex, hasThinkingMode)
+        manualStepLabel(currentStageIndex)
     }
     val title = when {
         isStopping -> "Stopping SMS processing"
@@ -441,11 +441,10 @@ private fun HomeSyncState.completedManualCardModel(
     )
 }
 
-private fun manualStepLabel(stageIndex: Int?, hasThinkingMode: Boolean): String =
+private fun manualStepLabel(stageIndex: Int?): String =
     when (stageIndex) {
         0, null -> "Checking message"
-        1 -> if (hasThinkingMode) "Reasoning on device" else "Extracting transaction"
-        2 -> "Extracting transaction"
+        1, 2 -> "Selecting grounded candidates"
         3 -> "Saving transaction"
         else -> "Finishing"
     }
@@ -484,8 +483,7 @@ fun AutomaticSmsProcessingActivity.toSmsPipelineCardUiModel():
         AutomaticSmsProcessingStage.FILTERING -> "Checking message"
         AutomaticSmsProcessingStage.LOADING_MODEL ->
             "Preparing on-device model"
-        AutomaticSmsProcessingStage.THINKING -> "Reasoning on device"
-        AutomaticSmsProcessingStage.GENERATING -> "Extracting transaction"
+        AutomaticSmsProcessingStage.GENERATING -> "Selecting grounded candidates"
         AutomaticSmsProcessingStage.PERSISTING -> "Saving transaction"
         AutomaticSmsProcessingStage.RETRYING -> "Retry scheduled"
         AutomaticSmsProcessingStage.FILTERED_OUT ->
@@ -683,7 +681,6 @@ private fun historicalStepLabel(
         "Committing current transaction"
     isFinishing -> "Finalizing setup"
     stage == HistoricalSmsProcessingStage.FILTERING -> "Checking message"
-    stage == HistoricalSmsProcessingStage.THINKING -> "Reasoning on device"
-    stage == HistoricalSmsProcessingStage.GENERATING -> "Extracting transaction"
+    stage == HistoricalSmsProcessingStage.GENERATING -> "Selecting grounded candidates"
     else -> "Saving transaction"
 }

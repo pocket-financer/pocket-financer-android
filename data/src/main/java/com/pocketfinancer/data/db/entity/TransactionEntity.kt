@@ -3,6 +3,7 @@ package com.pocketfinancer.data.db.entity
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import androidx.room.ColumnInfo
 import com.pocketfinancer.data.model.SmsSourceIdentity
 
 @Entity(
@@ -12,7 +13,7 @@ import com.pocketfinancer.data.model.SmsSourceIdentity
         Index(value = ["date"]),
         Index(value = ["type"]),
         Index(
-            value = ["sourceConnector", "sourceMessageId"],
+            value = ["sourceConnector", "sourceMessageId", "sourceEventId"],
             unique = true
         ),
         Index(
@@ -55,5 +56,17 @@ data class TransactionEntity(
         sourceTimestamp = date,
         messageType = 1
     ).fallbackFingerprint,
-    val sourceAlternateFingerprint: String? = null
+    val sourceAlternateFingerprint: String? = null,
+    val sourceId: String? = null,
+    val sourceEventId: String? = null,
+    val exactMinorUnits: Long? = null,
+    val currencyCode: String? = null,
+    val currencyScale: Int? = null,
+    val currencyProvenance: String? = null,
+    val timestampProvenance: String? = null,
+    val currentRevisionId: String? = null,
+    @ColumnInfo(defaultValue = "'legacy'")
+    val projectionState: String = "legacy",
+    @ColumnInfo(defaultValue = "'legacy_double_original_precision_unknown'")
+    val legacyPrecisionStatus: String = "legacy_double_original_precision_unknown"
 )

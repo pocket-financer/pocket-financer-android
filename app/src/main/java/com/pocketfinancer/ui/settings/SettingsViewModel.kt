@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.core.app.NotificationManagerCompat
 import com.pocketfinancer.data.repository.TransactionRepository
+import com.pocketfinancer.data.repository.ProcessingConfigurationRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.explainTierSelection
@@ -13,9 +14,6 @@ import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.inference.ModelDownloader
-import com.pocketfinancer.inference.SlmChatMessage
-import com.pocketfinancer.inference.SlmExtractionRequest
-import com.pocketfinancer.inference.SlmExtractionResult
 import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelSpec
 import com.pocketfinancer.inference.SlmModelStorage
@@ -25,12 +23,12 @@ import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.inference.SlmRuntimePhase
 import com.pocketfinancer.inference.SlmRuntimeState
 import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
-import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.pipeline.PromptBuilder
+import com.pocketfinancer.pipeline.PipelineService
 import com.pocketfinancer.pipeline.SlmProcessingPreferences
-import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.SmsWorkAdmissionPause
 import com.pocketfinancer.pipeline.SmsWorkController
+import com.pocketfinancer.sms.SmsWorkScheduler
+import com.pocketfinancer.sms.SmsReader
 import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.SelectedModelResidency
 import com.pocketfinancer.SelectedModelMutationPause
@@ -100,7 +98,6 @@ data class SettingsUiState(
     val resetRunning: Boolean = false,
     val testRunning: Boolean = false,
     val testProgress: String? = null,
-    val thinkingOutput: String? = null,
     val testResult: String? = null,
     val testParsed: String? = null,
     val testError: String? = null,
@@ -110,6 +107,9 @@ data class SettingsUiState(
     val processIncomingSms: Boolean = AutomaticProcessingPreferences.DEFAULT_ENABLED,
     val automaticProcessingChangeRunning: Boolean = false,
     val automaticProcessingError: String? = null,
+    val primaryCurrency: String = "INR",
+    val confirmedPrimaryCurrency: String? = null,
+    val primaryCurrencyError: String? = null,
     val gbnfGrammarEnabled: Boolean = false,
     val gbnfGrammarError: String? = null,
     val readSmsPermissionGranted: Boolean = false,
@@ -179,9 +179,6 @@ class SettingsViewModel @Inject constructor(
     private val slmRuntime: SlmRuntime,
     private val modelStorage: SlmModelStorage,
     private val modelDownloader: ModelDownloader,
-    private val promptBuilder: PromptBuilder,
-    private val extractionParser: ExtractionParser,
-    private val smsFilterPipeline: SmsFilterPipeline,
     private val transactionRepository: TransactionRepository,
     private val automaticProcessingPreferences: AutomaticProcessingPreferences,
     private val slmProcessingPreferences: SlmProcessingPreferences,
@@ -192,7 +189,10 @@ class SettingsViewModel @Inject constructor(
     private val onboardingSyncManager: OnboardingSyncManager,
     private val onboardingRunGenerationStore: OnboardingRunGenerationStore,
     private val setupImportStore: SetupImportStore,
-    private val permissionHealthReader: SettingsPermissionHealthReader
+    private val permissionHealthReader: SettingsPermissionHealthReader,
+    private val processingConfigurationRepository: ProcessingConfigurationRepository,
+    private val smsWorkScheduler: SmsWorkScheduler,
+    private val pipelineService: PipelineService
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SettingsUiState())
@@ -210,6 +210,8 @@ class SettingsViewModel @Inject constructor(
         _state.value = _state.value.copy(
             processIncomingSms = automaticProcessingPreferences.enabled.value,
             gbnfGrammarEnabled = slmProcessingPreferences.gbnfGrammarEnabled.value,
+            primaryCurrency = processingConfigurationRepository.confirmedPrimaryCurrency() ?: "INR",
+            confirmedPrimaryCurrency = processingConfigurationRepository.confirmedPrimaryCurrency(),
             initialSetupModelPrepared =
                 setupImportStore.state.value.modelPrepared
         )
@@ -646,11 +648,8 @@ class SettingsViewModel @Inject constructor(
             return
         }
 
-        // Click-time snapshot: delays, queueing, and the native request all use
-        // this one value even if the switch changes in the meantime.
-        val useGrammar = slmProcessingPreferences.gbnfGrammarEnabled.value
         testJob = viewModelScope.launch {
-            runTestSms(spec, useGrammar)
+            runTestSms(spec)
         }
     }
 
@@ -658,7 +657,7 @@ class SettingsViewModel @Inject constructor(
         testJob?.cancel()
     }
 
-    private suspend fun runTestSms(spec: SlmModelSpec, useGrammar: Boolean) {
+    private suspend fun runTestSms(spec: SlmModelSpec) {
         val sender = "AX-HDFCBK"
         val body =
             "HDFC Bank: Rs.500.00 credited to a/c XXXXXX0000 on 01-01-20 by " +
@@ -676,10 +675,9 @@ class SettingsViewModel @Inject constructor(
 
         _state.value = _state.value.copy(
             testRunning = true,
-            testProgress = "Phase 0: SMS Filtering...",
+            testProgress = "Preparing deterministic analysis...",
             testResult = null,
             testParsed = null,
-            thinkingOutput = null,
             testError = null,
             filterLogs = null,
             sessionCacheLogs = null,
@@ -687,77 +685,55 @@ class SettingsViewModel @Inject constructor(
         )
 
         try {
-            delay(800)
-            val filter = smsFilterPipeline.filterWithDetails(sender, body)
-            _state.value = _state.value.copy(filterLogs = filter.logs)
-            delay(1_000)
-            if (!filter.isTransactional) {
-                _state.value = _state.value.copy(
-                    testRunning = false,
-                    testProgress = "Filtered Out (Non-transactional)",
-                    testResult = "Skipping SLM inference: SMS is non-transactional."
-                )
-                return
-            }
-
-            _state.value = _state.value.copy(testProgress = "Queued for local SLM runtime...")
+            _state.value = _state.value.copy(
+                testProgress = "Running one Candidate Selector pass..."
+            )
             val testLease = slmRuntime.acquire(SlmRuntimeOwner.SETTINGS_TEST, spec)
             lease = testLease
-            val rawPrompt = promptBuilder.buildExtractionPrompt(sender, body)
-            val fallbackPrompt = promptBuilder.buildChatPrompt(
-                rawPrompt,
-                enableThinking = testLease.model.hasThinkingMode
-            )
-            val staticPrefix = promptBuilder.getStaticPrefix()
-            _state.value = _state.value.copy(
-                testProgress = "Checking/preparing KV cache session...",
-                slmPrompt = fallbackPrompt,
-                sessionCacheLogs = listOf(
-                    "Cache lookup is part of the queued extraction request.",
-                    "Exact cache diagnostics will be shown when it completes."
-                )
-            )
-
             val startedAt = System.currentTimeMillis()
-            _state.value = _state.value.copy(
-                testProgress = if (testLease.model.hasThinkingMode) {
-                    "Phase 1: Thinking (<think> block)..."
-                } else {
-                    "Generating JSON..."
-                }
+            val now = System.currentTimeMillis()
+            val result = pipelineService.processSingle(
+                sms = SmsReader.SmsMessage(
+                    address = sender,
+                    body = body,
+                    date = now,
+                    type = 1,
+                    providerMessageId = "synthetic-${java.util.UUID.randomUUID()}",
+                    sourceTimestamp = now
+                ),
+                lease = testLease,
+                trigger = "diagnostic"
             )
-            val result = testLease.extract(
-                SlmExtractionRequest(
-                    messages = listOf(
-                        SlmChatMessage(
-                            "system",
-                            "You are a helpful financial SMS extraction assistant."
-                        ),
-                        SlmChatMessage("user", rawPrompt)
-                    ),
-                    fallbackPrompt = fallbackPrompt,
-                    staticPrefix = staticPrefix,
-                    grammar = if (useGrammar) {
-                        modelStorage.readTextAsset(GRAMMAR_ASSET)
+            val elapsedMs = System.currentTimeMillis() - startedAt
+            val summary = when (result) {
+                is PipelineService.ProcessingResult.Saved ->
+                    if (result.alreadyCommitted) {
+                        "Direct extraction completed. The synthetic transaction was already saved."
                     } else {
-                        null
-                    },
-                    thinkingTokens = 1024,
-                    answerTokens = 256,
-                    thinkingCallback = { token ->
-                        _state.value = _state.value.copy(
-                            thinkingOutput = (_state.value.thinkingOutput ?: "") + token
-                        )
-                    },
-                    jsonCallback = { token ->
-                        _state.value = _state.value.copy(
-                            testProgress = "Phase 2: Structured JSON...",
-                            testResult = (_state.value.testResult ?: "") + token
-                        )
+                        "Direct extraction completed and saved the synthetic transaction."
                     }
-                )
+                is PipelineService.ProcessingResult.Skipped ->
+                    if (result.reason == PipelineService.SkipReason.RETAINED_FOR_REVIEW) {
+                        "Direct Candidate Selector completed. The synthetic result is saved for review."
+                    } else {
+                        "Deterministic analysis classified the synthetic message as not posted."
+                    }
+                PipelineService.ProcessingResult.AwaitingConfiguration ->
+                    "Confirm a primary currency before running this diagnostic."
+                PipelineService.ProcessingResult.Stopped -> "Diagnostic stopped."
+                is PipelineService.ProcessingResult.Failure -> result.message
+            }
+            _state.value = _state.value.copy(
+                testRunning = false,
+                testProgress = null,
+                testResult = "$summary\nElapsed: ${elapsedMs}ms",
+                testParsed = if (result is PipelineService.ProcessingResult.Saved) {
+                    "Open Transactions for the saved synthetic transaction."
+                } else {
+                    "Open Saved alert reviews for the durable Decision Trace."
+                },
+                testError = if (result is PipelineService.ProcessingResult.Failure) summary else null
             )
-            renderTestResult(result, System.currentTimeMillis() - startedAt)
         } catch (cancelled: CancellationException) {
             _state.value = _state.value.copy(
                 testRunning = false,
@@ -779,72 +755,6 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    private suspend fun renderTestResult(
-        result: SlmExtractionResult,
-        elapsedMs: Long
-    ) {
-        when (result) {
-            is SlmExtractionResult.Success -> {
-                val trimmed = result.json.trim()
-                val parsed = extractionParser.parse(trimmed)
-                val performance = result.perf?.let {
-                    "\n\nPerformance:\n" +
-                        "  Generation: ${it.tEvalMs}ms for ${it.nTokens} tokens\n" +
-                        "  Speed: ${"%.1f".format(it.tokensPerSecond)} tok/s"
-                }.orEmpty()
-                _state.value = _state.value.copy(
-                    testRunning = false,
-                    testProgress = null,
-                    testResult = "Raw JSON: $trimmed\nElapsed: ${elapsedMs}ms$performance",
-                    sessionCacheLogs = cacheDiagnostics(result.cache),
-                    testParsed = parsed?.let {
-                        "amount=${it.amount}, type=${it.type.name.lowercase()}, " +
-                            "counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
-                    } ?: "Parsed: null (non-financial)"
-                )
-            }
-            is SlmExtractionResult.Null -> {
-                _state.value = _state.value.copy(
-                    testRunning = false,
-                    testProgress = null,
-                    testResult = "Model returned null (not a financial transaction)\n" +
-                        "Elapsed: ${elapsedMs}ms",
-                    sessionCacheLogs = cacheDiagnostics(result.cache),
-                    testParsed = "N/A"
-                )
-            }
-            is SlmExtractionResult.Error -> {
-                _state.value = _state.value.copy(
-                    testRunning = false,
-                    testProgress = null,
-                    testError = result.message
-                )
-            }
-            is SlmExtractionResult.Stopped -> {
-                _state.value = _state.value.copy(
-                    testRunning = false,
-                    testProgress = null,
-                    testError = "Inference stopped"
-                )
-            }
-        }
-    }
-
-    private fun cacheDiagnostics(
-        cache: com.pocketfinancer.inference.SlmCacheDiagnostics
-    ): List<String> = when {
-        !cache.attempted -> listOf("This request did not use a session-cache prefix.")
-        cache.hit -> buildList {
-            add("KV cache hit (${cache.prefixTokens} prefix tokens).")
-            cache.sessionFile?.let { add("Session: ${File(it).name}") }
-        }
-        else -> buildList {
-            add("KV cache miss; the prefix was evaluated for this request.")
-            if (cache.prefixTokens > 0) add("Prefix Size: ${cache.prefixTokens} tokens")
-            cache.sessionFile?.let { add("Session: ${File(it).name}") }
-        }
-    }
-
     fun toggleProcessIncomingSms() {
         setProcessIncomingSms(!_state.value.processIncomingSms)
     }
@@ -852,6 +762,34 @@ class SettingsViewModel @Inject constructor(
     fun setProcessIncomingSms(enabled: Boolean) {
         if (_state.value.automaticProcessingChangeRunning) return
         changeAutomaticProcessing(enabled = enabled)
+    }
+
+    fun selectPrimaryCurrency(currency: String) {
+        val normalized = currency.uppercase()
+        if (normalized !in ProcessingConfigurationRepository.SUPPORTED) return
+        _state.value = _state.value.copy(
+            primaryCurrency = normalized,
+            primaryCurrencyError = null
+        )
+    }
+
+    fun confirmPrimaryCurrency() {
+        viewModelScope.launch {
+            try {
+                processingConfigurationRepository.confirmPrimaryCurrency(
+                    _state.value.primaryCurrency
+                )
+                _state.value = _state.value.copy(
+                    confirmedPrimaryCurrency = _state.value.primaryCurrency,
+                    primaryCurrencyError = null
+                )
+                smsWorkScheduler.reconcilePendingAutomaticWork()
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(
+                    primaryCurrencyError = "Primary currency could not be saved locally."
+                )
+            }
+        }
     }
 
     fun setGbnfGrammarEnabled(enabled: Boolean) {
@@ -1042,7 +980,10 @@ class SettingsViewModel @Inject constructor(
                             onDurableEraseStarted = {
                                 resetIntentDurable = true
                             },
-                            clearEncryptedData = transactionRepository::clearDatabase,
+                            clearEncryptedData = {
+                                transactionRepository.clearDatabase()
+                                processingConfigurationRepository.clear()
+                            },
                             cancelFinancialNotifications = {
                                 NotificationManagerCompat.from(context).cancelAll()
                             },

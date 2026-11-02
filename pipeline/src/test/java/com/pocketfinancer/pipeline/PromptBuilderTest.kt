@@ -100,35 +100,6 @@ class PromptBuilderTest {
         assertTrue(taskIdx < outputIdx, "YOUR TASK should come before Output:")
     }
 
-    // ── buildChatPrompt (fallback manual template) ────────────────────
-
-    @Test
-    fun `buildChatPrompt should wrap in Qwen3 format`() {
-        val result = promptBuilder.buildChatPrompt("Sender: AX-TEST\nSMS: Test\nOutput:", enableThinking = true)
-        assertTrue(result.startsWith("<|im_start|>system\n"))
-        assertTrue(result.contains("<|im_end|>"))
-        assertTrue(result.contains("<|im_start|>user\n"))
-        assertTrue(result.contains("<|im_start|>assistant\n"))
-    }
-
-    @Test
-    fun `buildChatPrompt should add thinking directive when enabled`() {
-        val result = promptBuilder.buildChatPrompt("Test prompt", enableThinking = true)
-        assertTrue(result.contains("<think>"))
-    }
-
-    @Test
-    fun `buildChatPrompt should not add thinking directive when disabled`() {
-        val result = promptBuilder.buildChatPrompt("Test prompt", enableThinking = false)
-        assertTrue(!result.contains("<think>"))
-    }
-
-    @Test
-    fun `buildChatPrompt should include the raw prompt`() {
-        val result = promptBuilder.buildChatPrompt("Sender: AX-TEST\nSMS: Rs.500\nOutput:", enableThinking = false)
-        assertTrue(result.contains("Sender: AX-TEST\nSMS: Rs.500\nOutput:"))
-    }
-
     @Test
     fun `getStaticPrefix should return non-empty prompt containing system prompt and examples`() {
         val prefix = promptBuilder.getStaticPrefix()

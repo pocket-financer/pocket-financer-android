@@ -27,6 +27,8 @@ import com.pocketfinancer.ui.navigation.Screen
 import com.pocketfinancer.ui.settings.SettingsScreen
 import com.pocketfinancer.ui.transactions.TransactionsScreen
 import com.pocketfinancer.ui.onboarding.OnboardingScreen
+import com.pocketfinancer.ui.review.ReviewDetailScreen
+import com.pocketfinancer.ui.review.ReviewInboxScreen
 import com.pocketfinancer.ui.home.HomeScreen
 import com.pocketfinancer.ui.insights.InsightsScreen
 import com.pocketfinancer.ui.theme.M3_OnSecondaryContainer
@@ -137,6 +139,9 @@ fun PocketFinancerRoot() {
                         HomeScreen(
                             onNavigateToTab = { tab ->
                                 when (tab.lowercase()) {
+                                    "reviews" -> navController.navigate(Screen.Reviews.route) {
+                                        launchSingleTop = true
+                                    }
                                     "transactions" -> navController.navigate(Screen.Transactions.route) {
                                         popUpTo(navController.graph.findStartDestination().id) {
                                             saveState = true
@@ -155,17 +160,48 @@ fun PocketFinancerRoot() {
                             }
                         )
                     }
-                    composable(Screen.Transactions.route) { TransactionsScreen(onNavigateToTab = { tab ->
-                        if (tab.lowercase() == "settings") {
-                            navController.navigate(Screen.Settings.route) {
-                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                launchSingleTop = true
-                                restoreState = true
+                    composable(Screen.Transactions.route) {
+                        TransactionsScreen(
+                            onNavigateToTab = { tab ->
+                                when (tab.lowercase()) {
+                                    "settings" -> navController.navigate(Screen.Settings.route) {
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                    "reviews" -> navController.navigate(Screen.Reviews.route) {
+                                        launchSingleTop = true
+                                    }
+                                }
+                            },
+                            onOpenReview = { reviewCaseId ->
+                                navController.navigate(Screen.ReviewDetail.route(reviewCaseId))
                             }
-                        }
-                    }) }
+                        )
+                    }
                     composable(Screen.Insights.route) { InsightsScreen() }
                     composable(Screen.Settings.route) { SettingsScreen() }
+                    composable(Screen.Reviews.route) {
+                        ReviewInboxScreen(onOpenReview = { reviewCaseId ->
+                            navController.navigate(Screen.ReviewDetail.route(reviewCaseId))
+                        })
+                    }
+                    composable(Screen.ReviewDetail.route) { entry ->
+                        val reviewCaseId = entry.arguments?.getString("reviewCaseId")
+                        if (reviewCaseId != null) {
+                            ReviewDetailScreen(
+                                reviewCaseId = reviewCaseId,
+                                onFinished = {
+                                    navController.navigate(Screen.Transactions.route) {
+                                        popUpTo(navController.graph.findStartDestination().id)
+                                        launchSingleTop = true
+                                    }
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }

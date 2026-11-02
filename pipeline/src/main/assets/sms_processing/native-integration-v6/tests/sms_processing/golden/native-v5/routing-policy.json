@@ -1,0 +1,34 @@
+{
+  "contract": "pocketfinancer.native-routing-golden/2",
+  "release_id": "native-integration-v5",
+  "policy_contract": "pocketfinancer.persistence-policy/2",
+  "cases": [
+    {"id": "frozen_v4_complete_posted", "stored_release": "native-integration-v4", "result": "complete_posted", "destination": "review"},
+    {"id": "successor_complete_posted", "stored_release": "native-integration-v5", "result": "complete_posted", "destination": "transactions"},
+    {"id": "successor_invalid", "stored_release": "native-integration-v5", "result": "invalid", "destination": "review"},
+    {"id": "successor_missing_account", "stored_release": "native-integration-v5", "result": "missing_account", "destination": "review"},
+    {"id": "successor_ambiguous_account", "stored_release": "native-integration-v5", "result": "ambiguous_account", "destination": "review"},
+    {"id": "successor_duplicate", "stored_release": "native-integration-v5", "result": "duplicate", "destination": "review"},
+    {"id": "successor_abstain", "stored_release": "native-integration-v5", "result": "abstain", "destination": "review"},
+    {"id": "successor_interrupted", "stored_release": "native-integration-v5", "result": "interrupted", "destination": "review"},
+    {"id": "successor_incompatible", "stored_release": "native-integration-v5", "result": "incompatible", "destination": "review"},
+    {"id": "successor_runtime_failure", "stored_release": "native-integration-v5", "result": "runtime_failure", "destination": "review"},
+    {"id": "successor_none", "stored_release": "native-integration-v5", "result": "none", "destination": "no_transaction"}
+  ],
+  "retry": {
+    "previous_operation_is_reinterpreted": false,
+    "creates_distinct_operation": true,
+    "requires_parent_operation_id": true
+  },
+  "partial_review": {
+    "source": "INR 125.00 was debited.",
+    "invalid_model_output": {
+      "decision": "posted",
+      "amount": {"value": "125.00", "currency": "INR", "evidence": {"start_scalar": 0, "end_scalar": 10, "text": "INR 125.00"}},
+      "direction": {"value": "debit", "evidence": {"start_scalar": 15, "end_scalar": 22, "text": "debited"}},
+      "counterparty": null
+    },
+    "expected_valid_slm_fields": ["amount", "direction"],
+    "expected_unassigned_fields": ["account", "counterparty"]
+  }
+}

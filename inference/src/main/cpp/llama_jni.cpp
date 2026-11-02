@@ -7,8 +7,11 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <utility>
+#include <exception>
 
 #include "llama.h"
+#include "chat.h"
 #include "log.h"
 
 // ── Per-model state ─────────────────────────────────────────────────────────
@@ -204,7 +207,8 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     jfloat  temperature,
     jstring jstop,
     jboolean jkeep_cache,
-    jobject jcallback) {
+    jobject jcallback,
+    jboolean jrequire_json_object_start) {
 
     auto *inst = jlong_to_instance(handle);
     if (!inst || !inst->ctx || !operation_matches(inst, operation_id)) {
@@ -261,6 +265,8 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
 
     // Result buffer
     std::string result;
+    bool json_started = false;
+    bool mode_violation = false;
 
     // Look up callback method if provided
     jmethodID on_token_method = nullptr;
@@ -368,13 +374,27 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
             char buf[256];
             int n = llama_token_to_piece(inst->vocab, new_token, buf, sizeof(buf), 0, true);
             if (n > 0) {
-                result.append(buf, n);
-
-                // Stream token callback
-                if (jcallback && on_token_method) {
-                    jstring jtoken_piece = env->NewStringUTF(std::string(buf, n).c_str());
-                    env->CallVoidMethod(jcallback, on_token_method, jtoken_piece);
-                    env->DeleteLocalRef(jtoken_piece);
+                std::string piece(buf, n);
+                if (jrequire_json_object_start && !json_started) {
+                    const size_t first = piece.find_first_not_of(" \t\r\n");
+                    if (first == std::string::npos) {
+                        piece.clear();
+                    } else if (piece[first] != '{') {
+                        mode_violation = true;
+                        break;
+                    } else {
+                        json_started = true;
+                        piece.erase(0, first);
+                    }
+                }
+                if (!piece.empty()) {
+                    result.append(piece);
+                    // No decoded thought prefix reaches the callback.
+                    if (jcallback && on_token_method) {
+                        jstring jtoken_piece = env->NewStringUTF(piece.c_str());
+                        env->CallVoidMethod(jcallback, on_token_method, jtoken_piece);
+                        env->DeleteLocalRef(jtoken_piece);
+                    }
                 }
             }
 
@@ -405,6 +425,14 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeCompletion(
     if (grammar) env->ReleaseStringUTFChars(jgrammar, grammar);
     if (stop)    env->ReleaseStringUTFChars(jstop, stop);
 
+    if (mode_violation) {
+        jclass exception = env->FindClass("java/lang/IllegalStateException");
+        if (exception) {
+            env->ThrowNew(exception, "runtime_mode_violation");
+            env->DeleteLocalRef(exception);
+        }
+        return nullptr;
+    }
     return env->NewStringUTF(result.c_str());
 }
 
@@ -557,34 +585,35 @@ Java_com_pocketfinancer_inference_LlamaEngine_nativeApplyChatTemplate(
         return env->NewStringUTF("");
     }
 
-    // Get the model's built-in Jinja chat template
-    const char *tmpl = llama_model_chat_template(inst->model, nullptr);
-
-    // Render the template with the new API
-    int buf_size = 8192;  // increased buffer size for safety
-    std::string result(buf_size, '\0');
-    int written = llama_chat_apply_template(
-        tmpl,
-        msgs.data(),
-        (size_t)n_msgs,
-        (bool)add_assistant_prefix,
-        result.data(),
-        (int)result.size());
-
-    // Free allocated message strings (allocated by malloc inside parse_chat_messages_json)
+    // Copy messages before releasing the JNI parser's malloc-backed strings.
+    std::vector<common_chat_msg> chat_messages;
+    chat_messages.reserve(n_msgs);
     for (int i = 0; i < n_msgs; i++) {
+        common_chat_msg message;
+        message.role = msgs[i].role;
+        message.content = msgs[i].content;
+        chat_messages.push_back(std::move(message));
         free((void *)msgs[i].role);
         free((void *)msgs[i].content);
     }
 
-    if (written < 0) {
-        // Buffer too small or rendering failed
-        LOG_ERR("nativeApplyChatTemplate: template rendering failed (%d)\n", written);
+    try {
+        auto templates = common_chat_templates_init(inst->model, "");
+        common_chat_templates_inputs inputs;
+        inputs.messages = std::move(chat_messages);
+        inputs.add_generation_prompt = (bool)add_assistant_prefix;
+        inputs.use_jinja = true;
+        inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_NONE;
+        inputs.enable_thinking = false;
+        inputs.reasoning_format = COMMON_REASONING_FORMAT_NONE;
+        inputs.force_pure_content = true;
+        const std::string rendered =
+            common_chat_templates_apply(templates.get(), inputs).prompt;
+        return env->NewStringUTF(rendered.c_str());
+    } catch (const std::exception &) {
+        LOG_ERR("nativeApplyChatTemplate: non-thinking template rendering failed\n");
         return env->NewStringUTF("");
     }
-
-    result.resize(written);
-    return env->NewStringUTF(result.c_str());
 }
 
 // ── nativeGetPerfData ───────────────────────────────────────────────────────

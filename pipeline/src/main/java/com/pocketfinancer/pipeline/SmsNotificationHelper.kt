@@ -196,6 +196,34 @@ object SmsNotificationHelper {
         notifyIfPermitted(context, notificationId, builder.build())
     }
 
+    /** Replace the in-progress notification after coordinator-owned persistence. */
+    fun showSuccessNotification(
+        context: Context,
+        candidateKey: String,
+        newlyInserted: Boolean
+    ) {
+        createNotificationChannel(context)
+        val notificationId = getNotificationId(candidateKey)
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle(
+                if (newlyInserted) "Transaction saved locally" else "Transaction already saved"
+            )
+            .setContentText(
+                if (newlyInserted) {
+                    "Saved a transaction from this SMS."
+                } else {
+                    "This SMS was already committed; no duplicate was created."
+                }
+            )
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setContentIntent(getAppPendingIntent(context))
+
+        notifyIfPermitted(context, notificationId, builder.build())
+    }
+
     /**
      * Post a notification indicating processing failed.
      */

@@ -1,55 +1,48 @@
 package com.pocketfinancer.pipeline
 
-import com.pocketfinancer.data.repository.AccountRepository
-import com.pocketfinancer.data.repository.TransactionRepository
-import com.pocketfinancer.inference.SlmChatMessage
+import com.pocketfinancer.data.db.entity.AdmittedSmsSourceEntity
+import com.pocketfinancer.data.repository.ProcessingConfigurationRepository
+import com.pocketfinancer.data.repository.SmsProcessingStore
 import com.pocketfinancer.inference.SlmCacheDiagnostics
-import com.pocketfinancer.inference.SlmExtractionRequest
 import com.pocketfinancer.inference.SlmExtractionResult
 import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelSpec
-import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmPerformanceData
-import com.pocketfinancer.inference.SlmTokenCallback
 import com.pocketfinancer.sms.SmsReader
-import java.io.File
-import java.util.concurrent.atomic.AtomicReference
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
+import com.pocketfinancer.pipeline.sms.AdmittedMessageRef
+import com.pocketfinancer.pipeline.sms.DefaultSmsProcessingCoordinator
+import com.pocketfinancer.pipeline.sms.DefaultSmsV4ProcessingCoordinator
+import com.pocketfinancer.pipeline.sms.DefaultSmsV5ProcessingCoordinator
+import com.pocketfinancer.pipeline.sms.SmsOperationSnapshotFactory
+import com.pocketfinancer.pipeline.sms.SmsV4ModelIdentity
+import com.pocketfinancer.pipeline.sms.SmsV4OperationSnapshotFactory
+import com.pocketfinancer.pipeline.sms.SmsV5OperationSnapshotFactory
+import com.pocketfinancer.pipeline.sms.SmsProcessingOutcome
+import com.pocketfinancer.pipeline.sms.SmsProcessingObserver
+import com.pocketfinancer.pipeline.sms.SmsProcessingTransientEvent
+import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import org.json.JSONObject
 
-/**
- * Builds one extraction request and persists its result.
- *
- * Native access is owned exclusively by [SlmLease]. The caller chooses the
- * residency scope: workers normally hold a temporary lease for one SMS while
- * foreground batches keep a lease across the batch and call [processSingle]
- * once per item. A lease prevents eviction but does not reserve the native
- * execution lane, so independent FIFO requests can run between batch items.
- */
+/** Admits one SMS and routes it through the grounded processing coordinator. */
 @Singleton
 class PipelineService @Inject constructor(
-    private val promptBuilder: PromptBuilder,
-    private val extractionParser: ExtractionParser,
-    private val transactionRepository: TransactionRepository,
-    private val accountRepository: AccountRepository,
-    private val smsFilterPipeline: SmsFilterPipeline,
-    private val slmProcessingPreferences: SlmProcessingPreferences,
-    private val modelStorage: SlmModelStorage
+    private val smsProcessingStore: SmsProcessingStore,
+    private val snapshotFactory: SmsOperationSnapshotFactory,
+    private val processingConfiguration: ProcessingConfigurationRepository,
+    private val smsProcessingCoordinator: DefaultSmsProcessingCoordinator,
+    private val v4SnapshotFactory: SmsV4OperationSnapshotFactory,
+    private val v4Coordinator: DefaultSmsV4ProcessingCoordinator,
+    private val v5SnapshotFactory: SmsV5OperationSnapshotFactory,
+    private val v5Coordinator: DefaultSmsV5ProcessingCoordinator,
+    private val slmProcessingPreferences: SlmProcessingPreferences
 ) {
     private val _pipelineState = MutableStateFlow<PipelineStep?>(null)
     val pipelineState: StateFlow<PipelineStep?> = _pipelineState.asStateFlow()
-
-    private val extractionGrammar: String by lazy {
-        modelStorage.readTextAsset(GRAMMAR_ASSET)
-    }
 
     data class PipelineStep(
         val stage: Stage,
@@ -65,7 +58,8 @@ class PipelineService @Inject constructor(
 
     enum class SkipReason {
         NOT_TRANSACTION,
-        EXTRACTION_REJECTED
+        EXTRACTION_REJECTED,
+        RETAINED_FOR_REVIEW
     }
 
     /**
@@ -81,6 +75,12 @@ class PipelineService @Inject constructor(
     }
 
     sealed interface ProcessingEvent {
+        data class GroundedStage(
+            val stage: String,
+            val status: String,
+            val reasonCodes: List<String>
+        ) : ProcessingEvent
+
         data object DeterministicFilterStarted : ProcessingEvent
 
         data object DeterministicFilterRejected : ProcessingEvent
@@ -89,15 +89,14 @@ class PipelineService @Inject constructor(
 
         data class InferenceStarted(
             val model: SlmModelSpec,
-            val thinkingEnabled: Boolean,
             val grammarEnabled: Boolean,
-            val thinkingTokenBudget: Int,
             val answerTokenBudget: Int
         ) : ProcessingEvent
 
-        data class ThinkingTokenDelta(val delta: String) : ProcessingEvent
-
-        data class JsonTokenDelta(val delta: String) : ProcessingEvent
+        data class JsonTokenDelta(
+            val delta: String,
+            val cumulativeStructuredOutput: String
+        ) : ProcessingEvent
 
         /**
          * Keeps the exact terminal runtime result while exposing the metadata
@@ -138,12 +137,14 @@ class PipelineService @Inject constructor(
      * operational failure distinct for WorkManager retry and UI reporting.
      */
     sealed interface ProcessingResult {
+        data class Skipped(val reason: SkipReason) : ProcessingResult
+
         data class Saved(
-            val transaction: ExtractionParser.ExtractedTransaction,
-            val newlyInserted: Boolean = true
+            val transactionIds: List<String>,
+            val alreadyCommitted: Boolean
         ) : ProcessingResult
 
-        data class Skipped(val reason: SkipReason) : ProcessingResult
+        data object AwaitingConfiguration : ProcessingResult
 
         data object Stopped : ProcessingResult
 
@@ -154,248 +155,471 @@ class PipelineService @Inject constructor(
     }
 
     /**
-     * The ledger already owns [committedResult]. This must never be flattened
-     * into [ProcessingResult.Failure], which is reserved for work that did not
-     * produce a committed transaction.
-     */
-    class PostPersistenceCommitException internal constructor(
-        val committedResult: ProcessingResult.Saved,
-        cause: Exception
-    ) : RuntimeException(
-        "Ledger committed, but post-commit settlement failed",
-        cause
-    )
-
-    /**
-     * Process exactly one SMS using an already-owned residency lease.
-     *
-     * GBNF is snapshotted before any suspension. Prompt construction and
-     * database work stay outside the coordinator's native slot; chat-template
-     * rendering, token/session work, and inference are performed atomically by
-     * [SlmLease.extract]. The caller must keep [lease] alive until this method
-     * returns so maintenance/reset cannot interleave with persistence.
-     * [onPersistenceCommitted] runs inside the same non-cancellable boundary
-     * as a successful ledger insert, allowing batch owners to durably settle
-     * their per-item progress before a racing cancellation can unwind them.
-     * [observer] receives only this invocation's progress. Non-fatal observer
-     * failures are isolated; fatal VM, thread, and linkage failures propagate.
+     * Process exactly one SMS using an already-owned residency lease. The
+     * lease is passed into the coordinator so foreground batches never attempt
+     * a nested runtime acquisition.
      */
     suspend fun processSingle(
         sms: SmsReader.SmsMessage,
         lease: SlmLease,
-        onPersistenceCommitted: (ProcessingResult.Saved) -> Unit = {},
-        observer: ProcessingObserver? = null
+        observer: ProcessingObserver? = null,
+        trigger: String = "manual"
     ): ProcessingResult {
-        val gbnfEnabledForSms = slmProcessingPreferences.gbnfGrammarEnabled.value
-        val fatalObserverFailure = AtomicReference<Throwable?>(null)
-
-        notifyObserver(observer, ProcessingEvent.DeterministicFilterStarted)
-        if (!smsFilterPipeline.isTransactional(sms.address, sms.body)) {
-            notifyObserver(observer, ProcessingEvent.DeterministicFilterRejected)
-            emit(Stage.SKIPPED, "Not a transactional SMS")
-            return ProcessingResult.Skipped(SkipReason.NOT_TRANSACTION)
-        }
-        notifyObserver(observer, ProcessingEvent.DeterministicFilterPassed)
-
-        // The shared legacy state is not invocation-keyed, so never retain
-        // source evidence in it. Detailed consumers use the scoped observer.
-        emit(Stage.EXTRACTING, "Processing transactional SMS")
-
-        return try {
-            val rawPrompt = promptBuilder.buildExtractionPrompt(sms.address, sms.body)
-            val fallbackPrompt = promptBuilder.buildChatPrompt(
-                rawPrompt = rawPrompt,
-                enableThinking = lease.model.hasThinkingMode
-            )
-            val request = SlmExtractionRequest(
-                messages = listOf(
-                    SlmChatMessage(
-                        role = "system",
-                        content = EXTRACTION_SYSTEM_MESSAGE
-                    ),
-                    SlmChatMessage(role = "user", content = rawPrompt)
-                ),
-                fallbackPrompt = fallbackPrompt,
-                staticPrefix = promptBuilder.getStaticPrefix(),
-                grammar = if (gbnfEnabledForSms) extractionGrammar else null,
-                thinkingTokens = 1024,
-                answerTokens = 256,
-                thinkingCallback = observer?.let { activeObserver ->
-                    SlmTokenCallback { token ->
-                        notifyObserver(
-                            activeObserver,
-                            ProcessingEvent.ThinkingTokenDelta(token),
-                            fatalObserverFailure
-                        )
-                    }
-                },
-                jsonCallback = observer?.let { activeObserver ->
-                    SlmTokenCallback { token ->
-                        notifyObserver(
-                            activeObserver,
-                            ProcessingEvent.JsonTokenDelta(token),
-                            fatalObserverFailure
-                        )
-                    }
-                }
-            )
-
-            notifyObserver(
-                observer,
-                ProcessingEvent.InferenceStarted(
-                    model = lease.model,
-                    thinkingEnabled = lease.model.hasThinkingMode,
-                    grammarEnabled = gbnfEnabledForSms,
-                    thinkingTokenBudget = request.thinkingTokens,
-                    answerTokenBudget = request.answerTokens
-                )
-            )
-            val result = try {
-                lease.extract(request)
-            } catch (failure: Throwable) {
-                fatalObserverFailure.get()?.let { throw it }
-                throw failure
-            }
-            fatalObserverFailure.get()?.let { throw it }
-            notifyObserver(observer, ProcessingEvent.InferenceCompleted(result))
-
-            when (result) {
-                is SlmExtractionResult.Null -> {
-                    emit(Stage.SKIPPED, "Not a financial transaction", result.perf)
-                    ProcessingResult.Skipped(SkipReason.NOT_TRANSACTION)
-                }
-
-                is SlmExtractionResult.Error -> {
-                    emit(Stage.ERROR, result.message)
-                    ProcessingResult.Failure(result.message, retryable = true)
-                }
-
-                is SlmExtractionResult.Stopped -> {
-                    emit(Stage.ERROR, "Inference stopped")
-                    ProcessingResult.Stopped
-                }
-
-                is SlmExtractionResult.Success -> persistSuccess(
-                    sms = sms,
-                    result = result,
-                    onPersistenceCommitted = onPersistenceCommitted,
-                    observer = observer
-                )
-            }
-        } catch (postCommit: PostPersistenceCommitException) {
-            throw postCommit
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            val message = error.message ?: "Pipeline processing failed"
-            emit(Stage.ERROR, message)
-            ProcessingResult.Failure(message = message, retryable = true)
-        }
+        return processThroughV5Coordinator(
+            sms = sms,
+            lease = lease,
+            trigger = trigger,
+            store = smsProcessingStore,
+            configurationRepository = processingConfiguration,
+            observer = observer
+        )
     }
 
-    private suspend fun persistSuccess(
+    /**
+     * Process one durable source without requiring the caller to own model
+     * residency. The coordinator resolves the configured model and retains a
+     * visible review case when the selector cannot safely run.
+     */
+    suspend fun processSingle(
         sms: SmsReader.SmsMessage,
-        result: SlmExtractionResult.Success,
-        onPersistenceCommitted: (ProcessingResult.Saved) -> Unit,
+        observer: ProcessingObserver? = null,
+        trigger: String = "manual"
+    ): ProcessingResult {
+        return processThroughV5Coordinator(
+            sms = sms,
+            lease = null,
+            trigger = trigger,
+            store = smsProcessingStore,
+            configurationRepository = processingConfiguration,
+            observer = observer
+        )
+    }
+
+    suspend fun retryReview(reviewCaseId: String, configurationMode: String): ProcessingResult {
+        require(configurationMode in setOf("original", "current"))
+        val retry = smsProcessingStore.retryContext(reviewCaseId)
+        val previousConfiguration = JSONObject(retry.operation.configurationJson)
+        val previousCurrencyContext = previousConfiguration.getJSONObject("currency_context")
+        val previousContract = previousConfiguration.getString("contract")
+        val currency = if (configurationMode == "original") {
+            previousCurrencyContext.getString("primary_currency")
+        } else {
+            processingConfiguration.confirmedPrimaryCurrency()
+                ?: return ProcessingResult.AwaitingConfiguration
+        }
+        val profiles = if (configurationMode == "original") {
+            previousCurrencyContext.getJSONArray("enabled_profile_ids").let { values ->
+                (0 until values.length()).map { values.getString(it) }
+            }
+        } else {
+            processingConfiguration.enabledProfiles(currency)
+        }
+        val source = retry.source
+        val reference = AdmittedMessageRef(
+            source.id,
+            source.admissionReceiptId,
+            SmsProcessingStore.sha256(source.rawMessage)
+        )
+        if (configurationMode == "original" && previousContract == "pocketfinancer.processing-config/2") {
+            val selector = previousConfiguration.getJSONObject("selector")
+            val snapshot = snapshotFactory.create(
+                source = reference,
+                trigger = "retry",
+                primaryCurrency = currency,
+                enabledProfiles = profiles,
+                sourceTimestampEpochMs = source.sourceTimestamp,
+                sourceTimestampProvenance = if (source.sourceTimestamp == null) "unknown" else
+                    "acquisition_supplied_message_time",
+                admissionTimestampEpochMs = source.admittedAt,
+                selectorModelId = selector.optString("model_identifier")
+                    .takeIf { it.isNotBlank() && it != "null" },
+                selectorModelHash = selector.optString("model_file_sha256")
+                    .takeIf { it.matches(Regex("[0-9a-f]{64}")) },
+                selectorRuntimeVersion = selector.optString("runtime_version", "llama.cpp-jni"),
+                deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
+                    ?: "android-device",
+                stableEventId = retry.operation.stableEventId,
+                parentOperationId = retry.operation.id
+            )
+            return mapOutcome(smsProcessingCoordinator.process(reference, snapshot))
+        }
+        val retryOriginalV4 = configurationMode == "original" &&
+            previousContract == "pocketfinancer.processing-config/4"
+        val retryOriginalV5 = configurationMode == "original" &&
+            previousContract == "pocketfinancer.processing-config/5"
+        val retryOriginalV6 = configurationMode == "original" &&
+            previousContract == "pocketfinancer.processing-config/6"
+        if (configurationMode == "original" &&
+            !retryOriginalV4 && !retryOriginalV5 && !retryOriginalV6
+        ) {
+            return ProcessingResult.Failure(
+                "The original frozen configuration is retained but has no executable native adapter; retry with current configuration.",
+                retryable = false
+            )
+        }
+        val identity = if (configurationMode == "original") {
+            val extractor = previousConfiguration.getJSONObject("extractor")
+            SmsV4ModelIdentity(
+                extractor.getBoolean("eligible"),
+                extractor.optString("model_identifier").takeIf { it.isNotBlank() && it != "null" },
+                extractor.optString("model_file_sha256").takeIf {
+                    it.matches(Regex("[0-9a-f]{64}"))
+                }
+            )
+        } else v5Coordinator.currentModelIdentity()
+        val received = if (configurationMode == "original") {
+            previousConfiguration.getJSONObject("received_timestamp")
+        } else null
+        val receivedAt = received?.getLong("epoch_ms")
+            ?: source.sourceTimestamp ?: source.admittedAt
+        val receivedProvenance = received?.getString("provenance")
+            ?: if (source.sourceTimestamp == null) "platform_received" else
+                "acquisition_supplied_message_time"
+        val deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
+            ?: "android-device"
+        if (retryOriginalV4) {
+            val snapshot = v4SnapshotFactory.create(
+                source = reference,
+                trigger = "retry",
+                primaryCurrency = currency,
+                enabledProfiles = profiles,
+                receivedTimestampEpochMs = receivedAt,
+                receivedTimestampProvenance = receivedProvenance,
+                admissionTimestampEpochMs = source.admittedAt,
+                modelIdentity = identity,
+                runtimeVersion = "llama.cpp-jni",
+                deviceCohort = deviceCohort,
+                stableEventId = retry.operation.stableEventId,
+                parentOperationId = retry.operation.id
+            )
+            return mapOutcome(v4Coordinator.process(reference, snapshot))
+        }
+        val grammarEnabled = when {
+            retryOriginalV5 -> null
+            retryOriginalV6 -> previousConfiguration
+                .getJSONObject("extractor").getBoolean("grammar_enabled")
+            else -> slmProcessingPreferences.gbnfGrammarEnabled.value
+        }
+        val snapshot = v5SnapshotFactory.create(
+            source = reference,
+            trigger = "retry",
+            primaryCurrency = currency,
+            enabledProfiles = profiles,
+            receivedTimestampEpochMs = receivedAt,
+            receivedTimestampProvenance = receivedProvenance,
+            admissionTimestampEpochMs = source.admittedAt,
+            modelIdentity = identity,
+            runtimeVersion = "llama.cpp-jni",
+            deviceCohort = deviceCohort,
+            stableEventId = retry.operation.stableEventId,
+            parentOperationId = retry.operation.id,
+            grammarEnabled = grammarEnabled
+        )
+        return mapOutcome(v5Coordinator.process(reference, snapshot))
+    }
+
+    private suspend fun processThroughV5Coordinator(
+        sms: SmsReader.SmsMessage,
+        lease: SlmLease?,
+        trigger: String,
+        store: SmsProcessingStore,
+        configurationRepository: ProcessingConfigurationRepository,
         observer: ProcessingObserver?
     ): ProcessingResult {
-        val perfInfo = result.perf?.let { perf ->
-            " | prompt=${perf.tPromptEvalMs}ms gen=${perf.tEvalMs}ms " +
-                "${perf.tokensPerSecond.toInt()}tok/s"
-        }.orEmpty()
-        emit(
-            Stage.EXTRACTED,
-            "Extracted transaction data$perfInfo",
-            perf = result.perf
+        val sourceIdentity = sms.sourceIdentity
+        val sourceId = sourceIdentity.opaqueCandidateKey
+        val receiptId = UUID.nameUUIDFromBytes(sourceId.toByteArray(Charsets.UTF_8)).toString()
+        val now = System.currentTimeMillis()
+        store.admitSource(
+            AdmittedSmsSourceEntity(
+                id = sourceId,
+                sourceConnector = sourceIdentity.connector,
+                sourceMessageId = sourceIdentity.messageId,
+                sourceProviderMessageId = sourceIdentity.providerMessageId,
+                sourceFingerprint = sourceIdentity.fallbackFingerprint,
+                sourceAlternateFingerprint = sourceIdentity.alternateFingerprint,
+                sender = sms.address,
+                rawMessage = sms.body,
+                sourceTimestamp = sms.sourceTimestamp,
+                messageType = sms.type,
+                origin = trigger,
+                admissionReceiptId = receiptId,
+                admittedAt = now,
+                retentionState = "admitted"
+            )
         )
-
-        val parsed = extractionParser.parse(result.json)
-        if (parsed == null) {
-            emit(Stage.SKIPPED, "Nonnull filter rejected extraction")
-            return ProcessingResult.Skipped(SkipReason.EXTRACTION_REJECTED)
-        }
-
-        // This is the per-SMS cancellation/commit boundary. Cancellation that
-        // wins before this check leaves the candidate available for a later
-        // run. Once persistence starts, a user stop no longer interrupts the
-        // short account + ledger handoff; repository failures still follow the
-        // normal error path and are not described as an atomic DB transaction.
-        currentCoroutineContext().ensureActive()
-        notifyObserver(observer, ProcessingEvent.PersistenceStarted)
-        val savedResult = withContext(NonCancellable) {
-            val inferredBank = inferBankFromSender(sms.address)
-            val account = if (parsed.account != null) {
-                accountRepository.getOrCreate(
-                    parsed.account,
-                    inferredBank,
-                    "auto-extracted"
-                )
-            } else {
-                accountRepository.ensureDefault()
-            }
-
-            val merchantName = parsed.counterparty
-                ?.takeIf {
-                    it.isNotBlank() && !it.equals("null", ignoreCase = true)
+        val currency = configurationRepository.confirmedPrimaryCurrency()
+            ?: return ProcessingResult.AwaitingConfiguration
+        val reference = AdmittedMessageRef(
+            sourceId, receiptId, SmsProcessingStore.sha256(sms.body)
+        )
+        val snapshot = v5SnapshotFactory.create(
+            source = reference,
+            trigger = trigger,
+            primaryCurrency = currency,
+            enabledProfiles = configurationRepository.enabledProfiles(currency),
+            receivedTimestampEpochMs = sms.sourceTimestamp ?: now,
+            receivedTimestampProvenance = if (sms.sourceTimestamp == null) {
+                "platform_received"
+            } else "acquisition_supplied_message_time",
+            admissionTimestampEpochMs = now,
+            modelIdentity = lease?.let(v5Coordinator::modelIdentityForLease)
+                ?: v5Coordinator.currentModelIdentity(),
+            runtimeVersion = "llama.cpp-jni",
+            deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
+                ?: "android-device",
+            now = now,
+            grammarEnabled = slmProcessingPreferences.gbnfGrammarEnabled.value
+        )
+        val automaticObserver = SmsProcessingObserver { event ->
+            when (val transient = event.transient) {
+                is SmsProcessingTransientEvent.InferenceStarted -> runCatching {
+                    observer?.onEvent(ProcessingEvent.InferenceStarted(
+                        transient.model,
+                        transient.grammarEnabled,
+                        transient.answerTokenBudget
+                    ))
                 }
-                ?: if (inferredBank != "Unknown Account") {
-                    "Transaction ($inferredBank)"
-                } else {
-                    "Unknown Merchant"
+                is SmsProcessingTransientEvent.DecodedToken -> runCatching {
+                    observer?.onEvent(ProcessingEvent.JsonTokenDelta(
+                        transient.delta,
+                        transient.cumulativeStructuredOutput
+                    ))
                 }
-
-            val insertion = transactionRepository.insertIfAbsent(
-                TransactionRepository.NewTransaction(
-                    amount = parsed.amount,
-                    merchant = merchantName,
-                    date = sms.date,
-                    type = parsed.type,
-                    accountId = account.id,
-                    rawMessage = sms.body,
-                    sender = sms.address,
-                    slmPromptEvalMs = result.perf?.tPromptEvalMs,
-                    slmEvalMs = result.perf?.tEvalMs,
-                    slmNumTokens = result.perf?.nTokens,
-                    slmModelName = File(result.model.modelPath).name,
-                    sourceIdentity = sms.sourceIdentity
-                )
-            )
-            val committed = ProcessingResult.Saved(
-                transaction = parsed,
-                newlyInserted = insertion.inserted
-            )
-            try {
-                onPersistenceCommitted(committed)
-            } catch (error: Exception) {
-                // The callback is deliberately non-suspending and runs under
-                // NonCancellable, so a CancellationException thrown here is a
-                // callback failure rather than surrounding job cancellation.
-                // Preserve the committed receipt for every callback failure;
-                // genuine coroutine cancellation is still rethrown by
-                // processSingle outside this boundary.
-                throw PostPersistenceCommitException(committed, error)
+                is SmsProcessingTransientEvent.InferenceCompleted -> runCatching {
+                    val runtimeResult = transient.result
+                    val rawOutput = runtimeResult.rawOutput
+                    val result = when {
+                        rawOutput != null -> SlmExtractionResult.Success(
+                            rawOutput,
+                            runtimeResult.performance,
+                            runtimeResult.model,
+                            runtimeResult.cache ?: SlmCacheDiagnostics()
+                        )
+                        runtimeResult.completion == "interrupted" ->
+                            SlmExtractionResult.Stopped(runtimeResult.model)
+                        runtimeResult.safeErrorCode == "runtime_output_truncated" ->
+                            SlmExtractionResult.Null(
+                                runtimeResult.model,
+                                runtimeResult.performance,
+                                runtimeResult.cache ?: SlmCacheDiagnostics()
+                            )
+                        else -> SlmExtractionResult.Error(
+                            runtimeResult.safeErrorCode ?: "runtime_failure",
+                            runtimeResult.model
+                        )
+                    }
+                    observer?.onEvent(ProcessingEvent.InferenceCompleted(result))
+                }
+                null -> {
+                    when (event.stage) {
+                        "analysis", "triage" ->
+                            emit(Stage.EXTRACTING, "Preparing advisory evidence")
+                        "selector_execution" ->
+                            emit(Stage.EXTRACTING, "Extracting transaction fields")
+                        "selector_validation", "account_resolution", "reconstruction",
+                        "persistence_gate" ->
+                            emit(Stage.EXTRACTING, "Validating grounded transaction")
+                        "settlement" -> when (event.status) {
+                            "running" -> {
+                                emit(Stage.EXTRACTING, "Saving transaction")
+                                runCatching {
+                                    observer?.onEvent(ProcessingEvent.PersistenceStarted)
+                                }
+                            }
+                            "retained" -> emit(Stage.SKIPPED, "Saved for review")
+                        }
+                    }
+                    runCatching {
+                        observer?.onEvent(ProcessingEvent.GroundedStage(
+                            event.stage, event.status, event.reasonCodes.toList()
+                        ))
+                    }
+                }
             }
-            committed
         }
-
-        if (savedResult.newlyInserted) {
-            emit(Stage.SAVED, "Transaction saved")
-        } else {
-            emit(Stage.SAVED, "Transaction already saved")
+        val outcome = if (lease != null) {
+            v5Coordinator.processUsingLease(reference, snapshot, lease, automaticObserver)
+        } else v5Coordinator.process(reference, snapshot, automaticObserver)
+        return mapOutcome(outcome).also { result ->
+            when (result) {
+                is ProcessingResult.Saved -> emit(Stage.SAVED, "Transaction saved")
+                is ProcessingResult.Skipped -> emit(
+                    Stage.SKIPPED,
+                    if (result.reason == SkipReason.RETAINED_FOR_REVIEW) {
+                        "Saved for review"
+                    } else "No transaction created"
+                )
+                is ProcessingResult.Failure -> emit(Stage.ERROR, result.message)
+                ProcessingResult.AwaitingConfiguration ->
+                    emit(Stage.ERROR, "Primary currency is not configured")
+                ProcessingResult.Stopped -> emit(Stage.SKIPPED, "Processing stopped")
+            }
         }
-        return savedResult
     }
 
-    private fun inferBankFromSender(sender: String): String {
-        val upper = sender.uppercase()
-        return when {
-            upper.contains("HDFC") -> "HDFC Bank"
-            upper.contains("AXIS") -> "Axis Bank"
-            upper.contains("ICICI") -> "ICICI Bank"
-            upper.contains("SBI") -> "State Bank of India"
-            upper.contains("KOTAK") -> "Kotak Bank"
-            else -> "Unknown Account"
+    private suspend fun processThroughV4Coordinator(
+        sms: SmsReader.SmsMessage,
+        lease: SlmLease?,
+        trigger: String,
+        store: SmsProcessingStore,
+        configurationRepository: ProcessingConfigurationRepository,
+        observer: ProcessingObserver?
+    ): ProcessingResult {
+        val sourceIdentity = sms.sourceIdentity
+        val sourceId = sourceIdentity.opaqueCandidateKey
+        val receiptId = UUID.nameUUIDFromBytes(sourceId.toByteArray(Charsets.UTF_8)).toString()
+        val now = System.currentTimeMillis()
+        store.admitSource(
+            AdmittedSmsSourceEntity(
+                id = sourceId,
+                sourceConnector = sourceIdentity.connector,
+                sourceMessageId = sourceIdentity.messageId,
+                sourceProviderMessageId = sourceIdentity.providerMessageId,
+                sourceFingerprint = sourceIdentity.fallbackFingerprint,
+                sourceAlternateFingerprint = sourceIdentity.alternateFingerprint,
+                sender = sms.address,
+                rawMessage = sms.body,
+                sourceTimestamp = sms.sourceTimestamp,
+                messageType = sms.type,
+                origin = trigger,
+                admissionReceiptId = receiptId,
+                admittedAt = now,
+                retentionState = "admitted"
+            )
+        )
+        val currency = configurationRepository.confirmedPrimaryCurrency()
+            ?: return ProcessingResult.AwaitingConfiguration
+        val reference = AdmittedMessageRef(
+            sourceId, receiptId, SmsProcessingStore.sha256(sms.body)
+        )
+        val snapshot = v4SnapshotFactory.create(
+            source = reference,
+            trigger = trigger,
+            primaryCurrency = currency,
+            enabledProfiles = configurationRepository.enabledProfiles(currency),
+            receivedTimestampEpochMs = sms.sourceTimestamp ?: now,
+            receivedTimestampProvenance = if (sms.sourceTimestamp == null) {
+                "platform_received"
+            } else "acquisition_supplied_message_time",
+            admissionTimestampEpochMs = now,
+            modelIdentity = lease?.let(v4Coordinator::modelIdentityForLease)
+                ?: v4Coordinator.currentModelIdentity(),
+            runtimeVersion = "llama.cpp-jni",
+            deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
+                ?: "android-device",
+            now = now
+        )
+        val v4Observer = SmsProcessingObserver { event ->
+            when (event.stage) {
+                "analysis", "triage" -> emit(Stage.EXTRACTING, "Preparing advisory evidence")
+                "selector_execution" -> emit(Stage.EXTRACTING, "Extracting transaction fields")
+                "settlement" -> emit(Stage.SKIPPED, "Saved for review")
+            }
+            runCatching {
+                observer?.onEvent(ProcessingEvent.GroundedStage(
+                    event.stage, event.status, event.reasonCodes.toList()
+                ))
+            }
         }
+        val outcome = if (lease != null) {
+            v4Coordinator.processUsingLease(reference, snapshot, lease, v4Observer)
+        } else v4Coordinator.process(reference, snapshot, v4Observer)
+        return mapOutcome(outcome)
+    }
+
+    private suspend fun processThroughGroundedCoordinator(
+        sms: SmsReader.SmsMessage,
+        lease: SlmLease?,
+        trigger: String,
+        store: SmsProcessingStore,
+        snapshotFactory: SmsOperationSnapshotFactory,
+        configurationRepository: ProcessingConfigurationRepository,
+        coordinator: DefaultSmsProcessingCoordinator,
+        observer: ProcessingObserver?
+    ): ProcessingResult {
+        val sourceIdentity = sms.sourceIdentity
+        val sourceId = sourceIdentity.opaqueCandidateKey
+        val receiptId = UUID.nameUUIDFromBytes(sourceId.toByteArray(Charsets.UTF_8)).toString()
+        val now = System.currentTimeMillis()
+        store.admitSource(
+            AdmittedSmsSourceEntity(
+                id = sourceId,
+                sourceConnector = sourceIdentity.connector,
+                sourceMessageId = sourceIdentity.messageId,
+                sourceProviderMessageId = sourceIdentity.providerMessageId,
+                sourceFingerprint = sourceIdentity.fallbackFingerprint,
+                sourceAlternateFingerprint = sourceIdentity.alternateFingerprint,
+                sender = sms.address,
+                rawMessage = sms.body,
+                sourceTimestamp = sms.sourceTimestamp,
+                messageType = sms.type,
+                origin = trigger,
+                admissionReceiptId = receiptId,
+                admittedAt = now,
+                retentionState = "admitted"
+            )
+        )
+        val currency = configurationRepository.confirmedPrimaryCurrency()
+            ?: return ProcessingResult.AwaitingConfiguration
+        val reference = AdmittedMessageRef(
+            sourceId,
+            receiptId,
+            SmsProcessingStore.sha256(sms.body)
+        )
+        val snapshot = snapshotFactory.create(
+            source = reference,
+            trigger = trigger,
+            primaryCurrency = currency,
+            enabledProfiles = configurationRepository.enabledProfiles(currency),
+            sourceTimestampEpochMs = sms.sourceTimestamp,
+            sourceTimestampProvenance = "acquisition_supplied_message_time",
+            admissionTimestampEpochMs = now,
+            selectorModelId = lease?.model?.modelId ?: coordinator.currentSelectorModelId(),
+            selectorModelHash = null,
+            selectorRuntimeVersion = "llama.cpp-jni",
+            deviceCohort = android.os.Build.MODEL
+                ?.takeIf { it.isNotBlank() }
+                ?: "android-device",
+            now = now
+        )
+        val groundedObserver = SmsProcessingObserver { event ->
+            when (event.stage) {
+                "analysis", "triage" -> emit(Stage.EXTRACTING, "Analyzing grounded evidence")
+                "selector_execution" -> emit(Stage.EXTRACTING, "Selecting grounded candidates")
+                "settlement" -> emit(Stage.SKIPPED, "Saved for review")
+            }
+            runCatching {
+                observer?.onEvent(
+                    ProcessingEvent.GroundedStage(
+                        event.stage,
+                        event.status,
+                        event.reasonCodes.toList()
+                    )
+                )
+            }
+        }
+        val outcome = if (lease != null) {
+            coordinator.processUsingLease(reference, snapshot, lease, groundedObserver)
+        } else {
+            coordinator.process(reference, snapshot, groundedObserver)
+        }
+        return mapOutcome(outcome)
+    }
+
+    private fun mapOutcome(outcome: SmsProcessingOutcome): ProcessingResult = when (outcome) {
+        is SmsProcessingOutcome.TerminallyDiscarded ->
+            ProcessingResult.Skipped(SkipReason.NOT_TRANSACTION)
+        is SmsProcessingOutcome.RetainedForReview ->
+            ProcessingResult.Skipped(SkipReason.RETAINED_FOR_REVIEW)
+        is SmsProcessingOutcome.Persisted -> ProcessingResult.Saved(
+            outcome.transactionIds,
+            outcome.alreadyCommitted
+        )
+        is SmsProcessingOutcome.RetryableFailure -> ProcessingResult.Failure(
+            "Saved for retry: ${outcome.reason}", retryable = true
+        )
+        is SmsProcessingOutcome.Stopped -> ProcessingResult.Stopped
     }
 
     private fun emit(
@@ -410,33 +634,4 @@ class PipelineService @Inject constructor(
         )
     }
 
-    private fun notifyObserver(
-        observer: ProcessingObserver?,
-        event: ProcessingEvent,
-        fatalFailure: AtomicReference<Throwable?>? = null
-    ) {
-        try {
-            observer?.onEvent(event)
-        } catch (error: Throwable) {
-            when (error) {
-                is VirtualMachineError,
-                is ThreadDeath,
-                is LinkageError -> {
-                    fatalFailure?.compareAndSet(null, error)
-                    throw error
-                }
-            }
-            // Progress reporting is strictly observational. In particular, a
-            // callback-thrown CancellationException or AssertionError cannot change
-            // the owning pipeline operation's outcome. Fatal VM and runtime
-            // integrity failures are deliberately not swallowed.
-        }
-    }
-
-    companion object {
-        const val EXTRACTION_SYSTEM_MESSAGE =
-            "You are a helpful financial SMS extraction assistant."
-
-        private const val GRAMMAR_ASSET = "sms_extraction.gbnf"
-    }
 }

@@ -19,11 +19,9 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 ## 🌟 Key Features
 
 *   **Offline SLM Inference**: Processes SMS message semantics entirely locally using GGUF-based local LLMs.
-*   **Deterministic SMS Pre-Filtering**: A 6-stage, regex-based filter running in `< 1ms` to filter out personal numbers, marketing/OTP alerts, and non-transactional messages before running model inference, preserving device CPU and battery.
-*   **Three-Phase Reasoning Pipeline**:
-    *   *Phase 0 (Pre-Filtering)*: Checks sender, currency amounts, masked accounts, and action verbs; filters out OTPs and collect requests.
-    *   *Phase 1 (Chain of Thought)*: Dynamic allocation of `<think>` tokens (1024 token budget) to analyze the alert sender context and message logic.
-    *   *Phase 2 (Structured JSON Generation)*: Produces transaction JSON with optional **GBNF (GGML BNF) grammar** constraints. GBNF defaults off and can be enabled from Advanced diagnostics; each SMS snapshots the setting once before processing.
+*   **Advisory Deterministic Analysis**: Local rules provide cues and candidate spans to the model and reviewer. They are not the semantic answer or an allowlist.
+*   **Direct Grounded Extraction**: One local, non-thinking SLM pass decides `none`, `abstain`, or one posted transaction with exact source spans. Strict host code validates Unicode scalars, exact money, accounts, duplicates, and routing.
+*   **Live Processing Transparency**: The local monitor can show decoded token deltas and cumulative structured output while keeping analyzer evidence, raw output, validation, routing, and persistence distinct.
 *   **Dynamic Hardware Auto-Tuning**: Smart hardware profiling detects device RAM capacities and CPU architectures (specifically checking for `ARMv8.2-A` instruction features like `i8mm` and `dotprod` to accelerate integer math) to select the optimal model size automatically.
 *   **Disk-Based KV Cache Caching**: Saves and loads the static prefix KV cache state to/from disk using SHA-256 hashes. This cuts prefill time from ~140 seconds down to `< 100ms` on subsequent runs while automatically cleaning up old stale session files.
 *   **Cryptographically Secured Database**: Persists transaction and account information in a Room database encrypted with **SQLCipher (AES-256)**, protecting the local ledger at rest.
@@ -38,32 +36,15 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 ## ⚙️ How It Works (Dataflow Pipeline)
 
 ```mermaid
-graph TD
-    A[Incoming SMS Alert] -->|Telephony.SMS_RECEIVED| B(SmsReceiver)
-    B --> P{Automatic processing enabled?}
-    P -->|No| M[Await a later manual scan]
-    P -->|Yes: encrypted candidate admission| Q[(SQLCipher outbox)]
-    Q -->|Opaque candidate key| W[Unique WorkManager job]
-    W --> C[PipelineService]
-    C -->|Pre-Filter Checks| FP{SmsFilterPipeline<br>6-Stage Deterministic Filter}
-    FP -->|Dropped / Non-Transactional| Discard[Discard Alert]
-    FP -->|Passed / Transactional| C2[Inference Queue]
-    D[Device Profile] -->|RAM & CPU Flags| SEL{selectSlmForDevice}
-    SEL -->|Exact model request| R[Process-wide SlmRuntime coordinator]
-    R -->|Serialized native lifecycle| F[Internal LlamaEngine / llama.cpp]
-    C2 -->|Assembles Prompt & Context| E[PromptBuilder]
-    E -->|Raw Text Prompt| C2
-    C2 -->|Checks Cache File| CHK{Session File Exists?}
-    CHK -->|Yes: Load Cache < 100ms| R
-    CHK -->|No: Prefill Prefix| DEL[Delete Stale Sessions]
-    DEL -->|Save New Session| R
-    F -->|Phase 1: Chain of Thought Reasoning| F
-    F -->|Phase 2: Structured JSON Generation| F
-    F -->|JSON / Null Output| C2
-    C2 -->|Sanitize & Parse| G[ExtractionParser]
-    G -->|Normalized Transaction| C2
-    C2 -->|Writes Encrypted Entry| H[(SQLCipher Room DB)]
-    I[Jetpack Compose M3 UI] -->|Observes Flow| H
+flowchart LR
+    A["SMS + receipt/config"] --> B["Encrypted durable operation"]
+    B --> C["Advisory deterministic analysis"]
+    C --> D["One local SLM classification/extraction"]
+    D --> E["Strict parse + Unicode-scalar grounding"]
+    E --> F["Exact money + account + duplicate checks"]
+    F --> G["Versioned routing"]
+    G -->|"current v4 review-only"| H["Review"]
+    G -.->|"planned successor: complete valid"| I["Transactions"]
 ```
 
 ---
@@ -93,25 +74,21 @@ pocket-financer-android/
 
 ---
 
-## 🧠 Three-Phase Processing Pipeline
+## 🧠 Shared direct-extractor pipeline
 
-Extracting structured data from highly unstructured, localized SMS alerts (which vary drastically across dozens of Indian financial institutions) requires a reliable and power-efficient parsing mechanism:
-
-1.  **Phase 0: Deterministic SMS Pre-Filtering**:
-    Before waking the SLM execution engine, the incoming message runs through a 6-stage regex validation check ([SmsFilterPipeline.kt](pipeline/src/main/java/com/pocketfinancer/pipeline/SmsFilterPipeline.kt)) to assert that the alert contains actual transaction markers (amounts, masked accounts, action verbs) and excludes verification codes/OTPs and pending payment collect requests. If any stage fails, processing terminates instantly (taking less than 1ms), avoiding unnecessary CPU-heavy model evaluations.
-2.  **Phase 1: Thinking Pass (Chain of Thought)**:
-    For messages that pass the pre-filter, the system builds the inference prompt (merging the system prompt and few-shot examples) and appends `<think>` to the end. The local SLM processes the SMS semantics, reasoning step-by-step to verify transaction details.
-3.  **Phase 2: Structured JSON Generation**:
-    Once the thinking tag is closed with `</think>`, the native JNI engine generates the transaction JSON. The Backus-Naur Form (GBNF) grammar defined in [sms_extraction.gbnf](inference/src/main/assets/sms_extraction.gbnf) is optional and defaults off. It can be enabled under Settings → Advanced diagnostics to constrain vocabulary sampling to the expected schema. The value is snapshotted once per SMS, so an in-flight extraction never mixes settings; unconstrained output still passes through the defensive extraction parser and malformed results are rejected:
-    ```json
-    {
-      "amount": 1500.00,
-      "counterparty": "MIDAS DAILY",
-      "type": "debit", // or "credit"
-      "account": "A/c XX6254"
-    }
-    ```
-    With GBNF enabled, non-financial messages are constrained to the literal `"null"`. Without GBNF, the prompt requests the same output contract and the parser validates the result before anything is saved.
+1. **Preserve evidence and configuration:** create a durable operation with the
+   unchanged SMS, receipt time, release, currency, and real model-file identity.
+2. **Collect advisory evidence:** deterministic analysis records useful cues and
+   spans but does not decide the semantic result.
+3. **Run one direct SLM extraction:** the model returns only `none`, `abstain`,
+   or one posted event with amount, direction, account, optional counterparty, and
+   exact Unicode-scalar spans.
+4. **Validate deterministically:** the host rejects malformed JSON, bad spans,
+   inexact money, unresolved accounts, duplicate conflicts, and incompatible
+   provenance.
+5. **Route by version:** frozen v4 retains every posted result for review. A
+   successor contract will send complete valid results to Transactions and reserve
+   Review for exceptions.
 
 ---
 
@@ -201,6 +178,10 @@ versioning, signing, publication, and recovery.
 
 ## 📈 Project Status & Roadmap
 
+The canonical SMS handoff is [docs/sms-processing-next-steps.md](docs/sms-processing-next-steps.md).
+It distinguishes implemented v4 source from the planned exception-only review
+route and from still-open emulator/physical-device acceptance.
+
 - [x] **Phase 1-4**: Core Native JNI bindings, llama.cpp compilation, & Model Downloader pipeline.
 - [x] **Phase 5**: Pipeline service orchestration, validation rules, & SQLCipher secure database persistence.
 - [x] **Phase 6**: UI screen development. Dashboard registers (`Transactions` tab with full date-grouped cards, debit/credit filters, and SLM metadata bottom sheets) and Settings debug metrics are active. Dashboard summary (`Home` tab) and analytics graphs (`Insights` tab) are fully implemented and integrated.
@@ -217,7 +198,12 @@ Run the Python script in the workspace root to inject exactly 20 test SMS messag
 ```powershell
 python inject_sms.py
 ```
-This utility automatically configures shell appops permissions (`WRITE_SMS`) and restarts the Android Messages application to refresh the inbox view.
+By default, the utility reads `DATA/extraction_ds.jsonl` from a sibling
+`pocket-financer-intelligence` checkout. For another location, pass
+`--dataset /path/to/extraction_ds.jsonl`. It configures shell appops permissions
+(`WRITE_SMS`) and restarts the Android Messages application. **It clears the SMS
+inbox on connected emulators before injecting messages**; do not run it against
+an emulator containing messages you need to keep.
 
 ### 2. Replay First Run
 To test the onboarding sync visual elements repeatedly:
@@ -242,4 +228,4 @@ reconsidered in the future.
 ## 🤝 Acknowledgments
 
 *   [llama.cpp](https://github.com/ggerganov/llama.cpp) — Core engine powering local, on-device SLM execution.
-*   The SLM Evaluation Pipeline ([`pF_slm_selection`](https://github.com/ManishAradwad/pF_slm_selection)) which identified the best Small Language Models for this app.
+*   [Pocket Financer Intelligence](https://github.com/pocket-financer/pocket-financer-intelligence) — shared SMS contracts, evaluation, and model research.

@@ -88,7 +88,7 @@ class HistoricalSmsHomePresentationTest {
 
         source.value = source.value.copy(
             activeHistoricalSms = activity.copy(
-                thinkingOutput = "private reasoning",
+                decodedTokenDelta = "private delta",
                 jsonOutput = "private output"
             )
         )
@@ -124,7 +124,7 @@ class HistoricalSmsHomePresentationTest {
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
         val activity = activity().copy(
-            thinkingOutput = "private reasoning",
+            decodedTokenDelta = "private delta",
             jsonOutput = "private output"
         )
         val source = MutableStateFlow<HistoricalSmsProcessingActivity?>(activity)
@@ -179,7 +179,7 @@ class HistoricalSmsHomePresentationTest {
                     status = "syncing"
                 )
             ),
-            thinkingOutput = "private reasoning",
+            decodedTokenDelta = "private delta",
             jsonOutput = "private output"
         )
         val source = MutableStateFlow(sensitiveState)
@@ -214,11 +214,14 @@ class HistoricalSmsHomePresentationTest {
         val first = OnboardingSyncManager.OnboardingSyncState(
             isRunning = true,
             runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP,
-            activeHistoricalSms = activity().copy(thinkingOutput = "first")
+            activeHistoricalSms = activity().copy(
+                decodedTokenDelta = "first delta",
+                jsonOutput = "first"
+            )
         )
         val next = first.copy(
             activeHistoricalSms = first.activeHistoricalSms?.copy(
-                thinkingOutput = "second",
+                decodedTokenDelta = "private delta",
                 jsonOutput = "private output"
             )
         )
@@ -340,7 +343,6 @@ class HistoricalSmsHomePresentationTest {
     fun `telemetry mapping preserves exact runtime and cache facts`() {
         val activity = activity().copy(
             grammarEnabled = false,
-            thinkingTokenBudget = 1024,
             answerTokenBudget = 256,
             performance = HistoricalSlmPerformance(
                 promptEvalMs = 321,
@@ -356,7 +358,6 @@ class HistoricalSmsHomePresentationTest {
 
         val facts = activity.toSmsTelemetryRuntimeFacts()
         assertEquals(false, facts?.grammarEnabled)
-        assertEquals(1024, facts?.thinkingTokenBudget)
         assertEquals(256, facts?.answerTokenBudget)
         assertEquals(321L, facts?.promptEvalMs)
         assertEquals(2_500L, facts?.evalMs)

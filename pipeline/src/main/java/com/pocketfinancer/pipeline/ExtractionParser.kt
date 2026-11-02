@@ -7,14 +7,11 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Post-processes the SLM output after two-phase generation.
+ * Legacy parser retained only for displaying pre-grounded extraction records.
  *
  * Steps:
- * 1. Strip <think>...</think> blocks
- * 2. Parse JSON or detect null
- * 3. Apply nonnull filter: reject if amount/type/account contain null
- * 4. Coerce amount: strip non-numeric chars, parse to Double
- * 5. Normalize account: extract last-4-digits + card/account category
+ * New SMS processing never invokes this parser; it uses grounded candidate IDs
+ * and exact integer minor units through the coordinator.
  *
  * Ported from the Python eval pipeline (DATA/utils.py).
  */
@@ -34,10 +31,7 @@ class ExtractionParser @Inject constructor() {
      * field (amount, type, account) is missing or null, reject as non-financial.
      */
     fun parse(rawOutput: String): ExtractedTransaction? {
-        // Strip thinking blocks
-        val cleaned = rawOutput
-            .replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
-            .trim()
+        val cleaned = rawOutput.trim()
 
         // Check for literal "null"
         if (cleaned.equals("null", ignoreCase = true)) return null

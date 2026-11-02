@@ -7,6 +7,7 @@ import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isPublishedModelArtifact
 import com.pocketfinancer.inference.SlmModelStorage
+import com.pocketfinancer.data.repository.SmsProcessingStore
 import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.sms.SmsWorkScheduler
 import com.pocketfinancer.ui.settings.LocalFinancialEraseRecovery
@@ -37,6 +38,9 @@ class PocketFinancerApp : Application() {
 
     @Inject
     lateinit var setupImportStore: SetupImportStore
+
+    @Inject
+    lateinit var smsProcessingStore: SmsProcessingStore
 
     private val applicationScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -89,6 +93,7 @@ class PocketFinancerApp : Application() {
     private fun reconcileEncryptedSmsOutbox() {
         applicationScope.launch {
             try {
+                smsProcessingStore.recoverExpiredOperations()
                 smsWorkScheduler.reconcilePendingAutomaticWork()
             } catch (error: Exception) {
                 Log.e(TAG, "Could not reconcile encrypted SMS work", error)

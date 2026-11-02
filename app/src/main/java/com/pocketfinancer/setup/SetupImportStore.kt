@@ -392,6 +392,7 @@ class SetupImportStore private constructor(
             processedCount = preferences.getInt(KEY_PROCESSED_COUNT, 0),
             savedCount = preferences.getInt(KEY_SAVED_COUNT, 0),
             rejectedCount = preferences.getInt(KEY_REJECTED_COUNT, 0),
+            retainedReviewCount = preferences.getInt(KEY_RETAINED_REVIEW_COUNT, 0),
             failedCount = preferences.getInt(KEY_FAILED_COUNT, 0),
             lastSuccessfulScanMillis = preferences.nullableLong(KEY_LAST_SUCCESSFUL_SCAN),
             recentCoverageStartMillis =
@@ -467,6 +468,7 @@ class SetupImportStore private constructor(
             .putInt(KEY_PROCESSED_COUNT, normalized.processedCount)
             .putInt(KEY_SAVED_COUNT, normalized.savedCount)
             .putInt(KEY_REJECTED_COUNT, normalized.rejectedCount)
+            .putInt(KEY_RETAINED_REVIEW_COUNT, normalized.retainedReviewCount)
             .putInt(KEY_FAILED_COUNT, normalized.failedCount)
             .putNullableLong(
                 KEY_LAST_SUCCESSFUL_SCAN,
@@ -574,6 +576,7 @@ class SetupImportStore private constructor(
         processedCount = processedCount.coerceAtLeast(0),
         savedCount = savedCount.coerceAtLeast(0),
         rejectedCount = rejectedCount.coerceAtLeast(0),
+        retainedReviewCount = retainedReviewCount.coerceAtLeast(0),
         failedCount = failedCount.coerceAtLeast(0)
     )
 
@@ -610,6 +613,7 @@ class SetupImportStore private constructor(
         private const val KEY_ELIGIBLE_COUNT = "setup_import_eligible_count"
         private const val KEY_PROCESSED_COUNT = "setup_import_processed_count"
         private const val KEY_SAVED_COUNT = "setup_import_saved_count"
+        private const val KEY_RETAINED_REVIEW_COUNT = "setup_import_retained_review_count"
         private const val KEY_REJECTED_COUNT = "setup_import_rejected_count"
         private const val KEY_FAILED_COUNT = "setup_import_failed_count"
         private const val KEY_LAST_SUCCESSFUL_SCAN =

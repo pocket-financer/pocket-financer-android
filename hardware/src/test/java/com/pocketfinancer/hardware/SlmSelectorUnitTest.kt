@@ -198,21 +198,6 @@ class SlmSelectorUnitTest {
         assertEquals(SlmTier.QWEN3_0_6B_Q8_0, tiers[4])
     }
 
-    // ── SlmTier properties ────────────────────────────────────────────
-
-    @Test
-    fun `Qwen3 tiers should have thinking mode enabled`() {
-        assertTrue(SlmTier.QWEN3_1_7B_Q8_0.hasThinkingMode)
-        assertTrue(SlmTier.QWEN3_1_7B_Q4_K_M.hasThinkingMode)
-        assertTrue(SlmTier.QWEN3_0_6B_Q8_0.hasThinkingMode)
-    }
-
-    @Test
-    fun `Gemma4 tiers should not have thinking mode`() {
-        assertFalse(SlmTier.GEMMA4_E2B_Q8_0.hasThinkingMode)
-        assertFalse(SlmTier.GEMMA4_E2B_Q4_K_M.hasThinkingMode)
-    }
-
     @Test
     fun `sizeGb should convert MB to GB`() {
         assertEquals(700.0f / 1024.0f, SlmTier.QWEN3_0_6B_Q8_0.sizeGb, 0.001f)

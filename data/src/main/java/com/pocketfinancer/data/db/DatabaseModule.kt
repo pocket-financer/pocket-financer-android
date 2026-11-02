@@ -2,7 +2,9 @@ package com.pocketfinancer.data.db
 
 import com.pocketfinancer.data.db.dao.AccountDao
 import com.pocketfinancer.data.db.dao.QueuedSmsCandidateDao
+import com.pocketfinancer.data.db.dao.SmsProcessingDao
 import com.pocketfinancer.data.db.dao.TransactionDao
+import com.pocketfinancer.data.db.dao.TransactionRevisionDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -32,5 +34,15 @@ object DatabaseModule {
     @Provides
     fun provideQueuedSmsCandidateDao(db: AppDatabase): QueuedSmsCandidateDao {
         return db.queuedSmsCandidateDao()
+    }
+
+    @Provides
+    fun provideSmsProcessingDao(db: AppDatabase): SmsProcessingDao {
+        return db.smsProcessingDao()
+    }
+
+    @Provides
+    fun provideTransactionRevisionDao(db: AppDatabase): TransactionRevisionDao {
+        return db.transactionRevisionDao()
     }
 }

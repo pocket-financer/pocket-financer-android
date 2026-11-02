@@ -122,11 +122,8 @@ class AccountRepository (
     suspend fun getAllOnce(): List<Account> =
         accountDao.getAllOnce().map { it.toDomain() }
 
-    /**
-     * Find an existing account by (name, bank) or create it atomically.
-     * Used by the pipeline when the SLM extracts an account label.
-     * Normalizes the category and last four digits before matching.
-     */
+    /** Legacy explicit import helper; never used by SMS processing. */
+    @Deprecated("SMS processing must resolve an existing confirmed account")
     suspend fun getOrCreate(
         name: String,
         bank: String,
@@ -216,10 +213,8 @@ class AccountRepository (
         }
     }
 
-    /**
-     * Returns the default "__UNKNOWN__" account, creating it on first access.
-     * Used as a fallback when extraction yields no account info.
-     */
+    /** Legacy explicit import helper; never used by SMS processing. */
+    @Deprecated("Unknown accounts must remain unresolved and enter review")
     suspend fun ensureDefault(): Account = accountMutationMutex.withLock {
         completeInitialConsolidationLocked()
         val name = "__UNKNOWN__"

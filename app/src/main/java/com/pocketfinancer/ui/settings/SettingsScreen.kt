@@ -35,6 +35,7 @@ import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.ui.theme.*
 import com.pocketfinancer.ui.model.ModelDownloadProgressPanel
+import com.pocketfinancer.data.repository.ProcessingConfigurationRepository
 
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
@@ -77,6 +78,8 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         SmsAndUpdatesCard(
             state = state,
             onAutomaticProcessingChange = viewModel::setProcessIncomingSms,
+            onPrimaryCurrencySelected = viewModel::selectPrimaryCurrency,
+            onConfirmPrimaryCurrency = viewModel::confirmPrimaryCurrency,
             onRequestSmsPermissions = {
                 smsPermissionLauncher.launch(
                     arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)
@@ -146,18 +149,85 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 private fun SmsAndUpdatesCard(
     state: SettingsUiState,
     onAutomaticProcessingChange: (Boolean) -> Unit,
+    onPrimaryCurrencySelected: (String) -> Unit,
+    onConfirmPrimaryCurrency: () -> Unit,
     onRequestSmsPermissions: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onOpenAppSettings: () -> Unit
 ) {
+    var currencyMenuExpanded by remember { mutableStateOf(false) }
     SectionCard(title = "SMS & UPDATES") {
+        Text(
+            "Primary currency",
+            color = M3_OnSurface,
+            style = MaterialTheme.typography.titleSmall
+        )
+        Text(
+            "Used only when an alert has no explicit currency. Existing processing records keep their original setting snapshot.",
+            color = M3_OnSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+        )
+        ExposedDropdownMenuBox(
+            expanded = currencyMenuExpanded,
+            onExpandedChange = { currencyMenuExpanded = it }
+        ) {
+            OutlinedTextField(
+                value = state.primaryCurrency,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Currency") },
+                trailingIcon = {
+                    ExposedDropdownMenuDefaults.TrailingIcon(currencyMenuExpanded)
+                },
+                modifier = Modifier.menuAnchor().fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = currencyMenuExpanded,
+                onDismissRequest = { currencyMenuExpanded = false }
+            ) {
+                ProcessingConfigurationRepository.SUPPORTED.sorted().forEach { currency ->
+                    DropdownMenuItem(
+                        text = { Text(currency) },
+                        onClick = {
+                            onPrimaryCurrencySelected(currency)
+                            currencyMenuExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+        Button(
+            onClick = onConfirmPrimaryCurrency,
+            enabled = state.primaryCurrency != state.confirmedPrimaryCurrency,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+        ) {
+            Text(
+                if (state.primaryCurrency == state.confirmedPrimaryCurrency) {
+                    "Confirmed ${state.primaryCurrency}"
+                } else {
+                    "Confirm ${state.primaryCurrency}"
+                }
+            )
+        }
+        state.primaryCurrencyError?.let { error ->
+            Text(
+                error,
+                color = M3_Error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
         SettingSwitchRow(
             title = "Automatic SMS processing",
             description = if (state.processIncomingSms) {
-                "New eligible SMS alerts are processed automatically."
+                "Complete valid alerts become transactions; exceptions go to Review."
             } else {
                 "New SMS alerts wait for a manual scan."
             },
@@ -166,8 +236,8 @@ private fun SmsAndUpdatesCard(
             onCheckedChange = onAutomaticProcessingChange
         )
         Text(
-            text = "Turning this off discards pending automatic work. An SMS already " +
-                "claimed for processing may finish, and manual scans remain available.",
+            text = "Turning this off stops new background analysis; admitted evidence " +
+                "and manual scans remain available.",
             color = M3_OnSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 8.dp)
@@ -947,14 +1017,11 @@ private fun EngineCard(state: SettingsUiState, viewModel: SettingsViewModel) {
         state.slmPrompt?.let { prompt ->
             OutputBox(title = "Complete SLM Input Prompt", content = prompt)
         }
-        state.thinkingOutput?.let { thinking ->
-            OutputBox(title = "Thinking (<think> block)", content = thinking.take(2000))
-        }
         state.testResult?.let { result ->
-            OutputBox(title = "Raw Output", content = result)
+            OutputBox(title = "Diagnostic result", content = result)
         }
         state.testParsed?.let { parsed ->
-            OutputBox(title = "Parsed", content = parsed)
+            OutputBox(title = "Decision Trace", content = parsed)
         }
         state.testError?.let { error ->
             Text(

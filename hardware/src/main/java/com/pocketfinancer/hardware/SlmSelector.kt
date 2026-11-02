@@ -6,9 +6,8 @@ import java.io.File
  * Defines available SLM tiers and auto-selects the best one for the
  * device's hardware capabilities.
  *
- * Priority: Qwen3 > Gemma4 (Qwen3 has thinking-mode which is critical
- * for SMS extraction accuracy). Within each family, higher quant = better
- * quality but requires more RAM.
+ * Selection is based on device capacity and measured direct-generation quality.
+ * Within each family, higher quantization fidelity requires more RAM.
  *
  * HuggingFace GGUF repos:
  *   Qwen3:  unsloth/Qwen3-1.7B-GGUF
@@ -22,14 +21,13 @@ data class SlmTier(
     val sizeMb: Int,           // approximate GGUF size in MB
     val minRamGb: Float,       // minimum RAM to run
     val downloadUrl: String,
-    val family: String = "",   // "qwen3" or "gemma4"
-    val hasThinkingMode: Boolean = false
+    val family: String = ""   // "qwen3" or "gemma4"
 ) {
     val sizeGb: Float get() = sizeMb / 1024f
 
     companion object {
         // ═══════════════════════════════════════════════════════════════
-        // Qwen3-1.7B — best extraction quality (thinking mode)
+        // Qwen3-1.7B
         // ═══════════════════════════════════════════════════════════════
 
         /** Qwen3-1.7B Q8_0: ~1950 MB, best quality. Needs 4GB+ RAM, GPU recommended. */
@@ -41,8 +39,7 @@ data class SlmTier(
             sizeMb = 1950,
             minRamGb = 4.0f,
             downloadUrl = "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q8_0.gguf",
-            family = "qwen3",
-            hasThinkingMode = true
+            family = "qwen3"
         )
 
         /** Qwen3-1.7B Q4_K_M: ~1100 MB, good quality. 3.5GB+ RAM. */
@@ -54,12 +51,11 @@ data class SlmTier(
             sizeMb = 1136,
             minRamGb = 3.5f,
             downloadUrl = "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
-            family = "qwen3",
-            hasThinkingMode = true
+            family = "qwen3"
         )
 
         // ═══════════════════════════════════════════════════════════════
-        // Gemma 4 E2B — alternative, no thinking mode but newer arch
+        // Gemma 4 E2B
         // ═══════════════════════════════════════════════════════════════
 
         /** Gemma 4 E2B Q8_0: ~5170 MB. 8GB+ RAM, GPU recommended. */
@@ -71,8 +67,7 @@ data class SlmTier(
             sizeMb = 5170,
             minRamGb = 8.0f,
             downloadUrl = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q8_0.gguf",
-            family = "gemma4",
-            hasThinkingMode = false
+            family = "gemma4"
         )
 
         /** Gemma 4 E2B Q4_K_M: ~3180 MB. 6GB+ RAM. */
@@ -84,8 +79,7 @@ data class SlmTier(
             sizeMb = 3180,
             minRamGb = 6.0f,
             downloadUrl = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
-            family = "gemma4",
-            hasThinkingMode = false
+            family = "gemma4"
         )
 
         // ═══════════════════════════════════════════════════════════════
@@ -101,8 +95,7 @@ data class SlmTier(
             sizeMb = 700,
             minRamGb = 2.5f,
             downloadUrl = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
-            family = "qwen3",
-            hasThinkingMode = true
+            family = "qwen3"
         )
 
         /** Default model used during initial onboarding for fast setup. */
@@ -124,9 +117,9 @@ data class SlmTier(
  *
  * Priority logic:
  * 1. Gemma 4 E2B Q8_0  — if 8GB+ RAM AND high-performance CPU (highest quality)
- * 2. Gemma 4 E2B Q4_K_M — if 6GB+ RAM (balanced, non-thinking, alternative)
- * 3. Qwen3-1.7B Q8_0    — if 4GB+ RAM AND high-performance CPU (8-bit thinking model)
- * 4. Qwen3-1.7B Q4_K_M  — if 3.5GB+ RAM (balanced 4-bit thinking model)
+ * 2. Gemma 4 E2B Q4_K_M — if 6GB+ RAM (balanced alternative)
+ * 3. Qwen3-1.7B Q8_0    — if 4GB+ RAM AND high-performance CPU
+ * 4. Qwen3-1.7B Q4_K_M  — if 3.5GB+ RAM
  * 5. Qwen3-0.6B Q8_0    — if 2.5GB+ RAM (lightweight fallback)
  * 6. null               — if < 2.5GB RAM (BLOCKED)
  *
@@ -183,9 +176,9 @@ fun explainTierSelection(
             tier == SlmTier.GEMMA4_E2B_Q4_K_M ->
                 "Selected — balanced size/quality (4-bit quant, high-perf CPU)"
             tier == SlmTier.QWEN3_1_7B_Q8_0 ->
-                "Selected — balanced quality (8-bit thinking mode, high-perf CPU)"
+                "Selected — balanced quality (8-bit quant, high-perf CPU)"
             tier == SlmTier.QWEN3_1_7B_Q4_K_M ->
-                "Selected — balanced size/quality (4-bit thinking mode)"
+                "Selected — balanced size/quality (4-bit quant)"
             tier == SlmTier.QWEN3_0_6B_Q8_0 ->
                 "Selected — lightweight fallback for low-RAM devices"
             else -> "Selected — auto-picked based on hardware"
@@ -285,5 +278,3 @@ fun resolveActiveSlmTier(
     // 4. Fall back to hardware recommendation selector
     return selectSlmForDevice(device)
 }
-
-

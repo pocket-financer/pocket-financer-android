@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pocketfinancer.persistence-policy-schema/2",
+  "title": "Final Native SMS Persistence and Routing Policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "predecessor", "default_rollout_mode", "automatic_persistence_enabled", "complete_posted_destination", "exception_destination", "duplicate_destination", "valid_none_destination", "valid_none_review_case_created", "transaction_write", "stored_operation_release_behavior", "retry_behavior", "review_contract", "processing_result_contract", "source_retention", "requires_unique_existing_account", "requires_clear_duplicate_assessment", "allows_automatic_account_creation", "allows_default_account_fallback"],
+  "properties": {
+    "contract": {"const": "pocketfinancer.persistence-policy/2"},
+    "predecessor": {"const": "pocketfinancer.persistence-policy/1"},
+    "default_rollout_mode": {"const": "automatic"},
+    "automatic_persistence_enabled": {"const": true},
+    "complete_posted_destination": {"const": "transactions"},
+    "exception_destination": {"const": "review"},
+    "duplicate_destination": {"const": "review"},
+    "valid_none_destination": {"const": "no_transaction"},
+    "valid_none_review_case_created": {"const": false},
+    "transaction_write": {"const": "atomic_with_operation_settlement"},
+    "stored_operation_release_behavior": {"const": "original_release"},
+    "retry_behavior": {"const": "new_operation_with_parent_operation_id"},
+    "review_contract": {"const": "pocketfinancer.review-case/2"},
+    "processing_result_contract": {"const": "pocketfinancer.processing-result/3"},
+    "source_retention": {"const": "host_privacy_policy"},
+    "requires_unique_existing_account": {"const": true},
+    "requires_clear_duplicate_assessment": {"const": true},
+    "allows_automatic_account_creation": {"const": false},
+    "allows_default_account_fallback": {"const": false}
+  }
+}

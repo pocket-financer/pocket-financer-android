@@ -1,0 +1,7 @@
+root ::= ws (none | abstain | posted) ws
+none ::= "{" ws "\"decision\"" ws ":" ws "\"none\"" ws "}"
+abstain ::= "{" ws "\"decision\"" ws ":" ws "\"abstain\"" ws "}"
+posted ::= "{" ws "\"decision\"" ws ":" ws "\"posted\"" ws "," ws "\"amount\"" ws ":" ws string ws "," ws "\"direction\"" ws ":" ws string ws "," ws "\"account\"" ws ":" ws string ws "," ws "\"counterparty\"" ws ":" ws string ws "}"
+string ::= "\"" chars "\""
+chars ::= ([A-Za-z0-9_-] chars)?
+ws ::= ([ \t\n\r] ws)?

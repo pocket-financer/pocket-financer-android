@@ -47,6 +47,12 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getById(id: String): TransactionEntity?
 
+    @Query("SELECT * FROM transactions WHERE sourceId = :sourceId AND sourceEventId = :eventId LIMIT 1")
+    suspend fun getBySourceEvent(sourceId: String, eventId: String): TransactionEntity?
+
+    @Query("SELECT * FROM transactions WHERE sourceId = :sourceId ORDER BY date, id")
+    suspend fun getAllBySource(sourceId: String): List<TransactionEntity>
+
     @Query(
         """
         SELECT * FROM transactions

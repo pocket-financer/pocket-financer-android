@@ -172,7 +172,7 @@ Key patterns:
 ---
 
 ### Screen 4: TelemetryLogsViewer.kt
-**File:** [TelemetryLogsViewer.kt](../app/src/main/java/com/pocketfinancer/ui/transactions/TelemetryLogsViewer.kt)
+**Current file:** [SmsTelemetryViewer.kt](../app/src/main/java/com/pocketfinancer/ui/smsprocessing/SmsTelemetryViewer.kt)
 **Override count:** 15+
 
 This is a developer/debug screen, so smaller text is somewhat justified. However:

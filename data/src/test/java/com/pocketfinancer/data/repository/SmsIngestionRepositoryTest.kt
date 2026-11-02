@@ -39,7 +39,8 @@ class SmsIngestionRepositoryTest {
         ingestionRepository = SmsIngestionRepository(
             database,
             database.transactionDao(),
-            database.queuedSmsCandidateDao()
+            database.queuedSmsCandidateDao(),
+            database.smsProcessingDao()
         )
         accountRepository = AccountRepository(
             database.accountDao(),

@@ -8,6 +8,9 @@ import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.model.Account
 import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.data.repository.AccountRepository
+import com.pocketfinancer.data.repository.SmsReviewRepository
+import com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity
+import com.pocketfinancer.data.db.entity.SmsReviewCaseEntity
 import com.pocketfinancer.ui.home.HomeSyncManager
 import com.pocketfinancer.ui.smsprocessing.SmsProcessingTarget
 import com.pocketfinancer.ui.home.HomeSyncState
@@ -19,9 +22,6 @@ import com.pocketfinancer.ui.home.manualSyncPresentationState
 import com.pocketfinancer.ui.home.sanitizedManualSyncState
 import com.pocketfinancer.ui.home.showManualSyncStopRejectionFeedback
 import com.pocketfinancer.pipeline.SmsFilterPipeline
-import com.pocketfinancer.pipeline.PromptBuilder
-import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.SlmAppFlowCoordinator
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -52,7 +52,9 @@ data class TransactionsUiState(
     val selectedAccountId: String = "All",
     val syncState: HomeSyncState = HomeSyncState(),
     val searchQuery: String = "",
-    val sortOption: SortOption = SortOption.DATE_DESC
+    val sortOption: SortOption = SortOption.DATE_DESC,
+    val processingOperations: List<SmsProcessingOperationEntity> = emptyList(),
+    val reviewCases: List<SmsReviewCaseEntity> = emptyList()
 )
 
 @HiltViewModel
@@ -62,10 +64,8 @@ class TransactionsViewModel @Inject constructor(
     private val accountRepository: AccountRepository,
     private val syncManager: HomeSyncManager,
     private val smsFilterPipeline: SmsFilterPipeline,
-    private val promptBuilder: PromptBuilder,
-    private val slmRuntime: SlmRuntime,
-    private val extractionParser: ExtractionParser,
-    private val appFlowCoordinator: SlmAppFlowCoordinator
+    private val appFlowCoordinator: SlmAppFlowCoordinator,
+    private val smsReviewRepository: SmsReviewRepository
 ) : ViewModel() {
 
     private val _activeSegment = MutableStateFlow("All")
@@ -82,6 +82,13 @@ class TransactionsViewModel @Inject constructor(
 
     private val _sortOption = MutableStateFlow(SortOption.DATE_DESC)
     val sortOption: StateFlow<SortOption> = _sortOption.asStateFlow()
+
+    private val _processingOperations = MutableStateFlow<List<SmsProcessingOperationEntity>>(emptyList())
+    private val _reviewCases = MutableStateFlow<List<SmsReviewCaseEntity>>(emptyList())
+
+    init {
+        refreshNativeWork()
+    }
 
     /** Full evidence is collected only by an open telemetry sheet. */
     val manualSyncTelemetry: StateFlow<HomeSyncState> = syncManager.syncState
@@ -104,7 +111,9 @@ class TransactionsViewModel @Inject constructor(
         _selectedAccountId,
         manualSyncUiState,
         _searchQuery,
-        _sortOption
+        _sortOption,
+        _processingOperations,
+        _reviewCases
     ) { flowsArray ->
         val txs = flowsArray[0] as List<Transaction>
         val segment = flowsArray[1] as String
@@ -114,6 +123,8 @@ class TransactionsViewModel @Inject constructor(
         val syncState = flowsArray[5] as HomeSyncState
         val query = flowsArray[6] as String
         val sort = flowsArray[7] as SortOption
+        val processing = flowsArray[8] as List<SmsProcessingOperationEntity>
+        val reviews = flowsArray[9] as List<SmsReviewCaseEntity>
 
         val filteredBySegment = when (segment) {
             "Debits" -> txs.filter { it.type == TransactionType.DEBIT }
@@ -151,7 +162,9 @@ class TransactionsViewModel @Inject constructor(
             selectedAccountId = selectedAccId,
             syncState = syncState,
             searchQuery = query,
-            sortOption = sort
+            sortOption = sort,
+            processingOperations = processing,
+            reviewCases = reviews
         )
     }
     .stateIn(
@@ -178,6 +191,17 @@ class TransactionsViewModel @Inject constructor(
 
     fun updateSortOption(option: SortOption) {
         _sortOption.value = option
+    }
+
+    fun refreshNativeWork() {
+        viewModelScope.launch {
+            runCatching {
+                smsReviewRepository.activeOperations() to smsReviewRepository.openCases()
+            }.onSuccess { (processing, reviews) ->
+                _processingOperations.value = processing
+                _reviewCases.value = reviews
+            }
+        }
     }
 
     fun resetSyncState() {
@@ -215,29 +239,36 @@ class TransactionsViewModel @Inject constructor(
 
     fun updateTransaction(
         id: String,
-        amount: Double,
+        expectedRevisionId: String?,
+        amountText: String,
+        currencyCode: String,
         merchant: String,
         type: TransactionType,
-        accountName: String
+        accountId: String,
+        onResult: (Boolean) -> Unit = {}
     ) {
         viewModelScope.launch {
-            withLedgerEditAdmission(appFlowCoordinator) {
-                val account = accountRepository.getOrCreate(
-                    name = accountName.trim(),
-                    bank = "Unknown Account",
-                    type = "auto-extracted"
-                )
-                val updated = transactionRepository.updateTransaction(
-                    id = id,
-                    amount = amount,
-                    merchant = merchant,
-                    type = type,
-                    accountId = account.id
-                )
-                if (_selectedTransaction.value?.id == id) {
-                    _selectedTransaction.value = updated
+            val receipt = runCatching {
+                withLedgerEditAdmission(appFlowCoordinator) {
+                    transactionRepository.editProjection(
+                        TransactionRepository.ProjectionEditCommand(
+                            actionId = java.util.UUID.randomUUID().toString(),
+                            transactionId = id,
+                            expectedRevisionId = expectedRevisionId,
+                            amountText = amountText,
+                            currencyCode = currencyCode,
+                            merchant = merchant,
+                            type = type,
+                            accountId = accountId
+                        )
+                    )
                 }
+            }.getOrNull()
+            val updated = receipt?.transaction
+            if (updated != null && _selectedTransaction.value?.id == id) {
+                _selectedTransaction.value = updated
             }
+            onResult(updated != null)
         }
     }
 
@@ -262,24 +293,14 @@ class TransactionsViewModel @Inject constructor(
         if (!item.hasDiagnosticSourceEvidence()) {
             return SOURCE_EVIDENCE_UNAVAILABLE
         }
-        val rawPrompt = promptBuilder.buildExtractionPrompt(
-            item.sender,
-            item.body
-        )
-        val hasThinking = slmRuntime.state.value.loadedModel?.hasThinkingMode ?: true
-        return promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
-    }
-
-    fun getParsedOutput(jsonStr: String): String {
-        val parsed = extractionParser.parse(jsonStr)
-        return parsed?.let {
-            "amount=${it.amount}, type=${it.type.name.lowercase()}, counterparty=${it.counterparty ?: "-"}, account=${it.account ?: "-"}"
-        } ?: "Parsed: null (non-financial)"
+        return DECISION_TRACE_MESSAGE
     }
 
     private companion object {
         const val SOURCE_EVIDENCE_UNAVAILABLE =
             "Source evidence is unavailable after terminal processing."
+        const val DECISION_TRACE_MESSAGE =
+            "The legacy extraction prompt is no longer used. Open Saved alert reviews to inspect the durable Decision Trace."
     }
 }
 
