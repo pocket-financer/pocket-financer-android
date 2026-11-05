@@ -4,6 +4,17 @@ Read `copilot-instructions.md` for project architecture, build, test, and
 emulator context. Verify documentation against the current code before relying
 on it.
 
+## Coordinated cleanup handoff
+
+For cross-repository cleanup, first read the single shared
+[cleanup plan](../pocket-financer-intelligence/docs/CLEANUP_PLAN.md) in the sibling
+intelligence checkout. It records the owner's approved target, PR inventory,
+preservation boundaries, and next task; do not duplicate it here. Its cleanup
+target supersedes older product/roadmap choices, not privacy or Git/release
+safeguards. Verify branches and PR state: useful implementation work is still on
+unmerged feature branches, not necessarily the current checkout. If the plan is
+absent, locate intelligence's `codex/docs-cleanup-handoff` branch before proceeding.
+
 ## Codex collaboration model profile
 
 This repository currently uses the following Codex collaboration profile
