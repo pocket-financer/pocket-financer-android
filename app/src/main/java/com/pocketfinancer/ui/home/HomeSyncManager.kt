@@ -5,7 +5,6 @@ import android.util.Log
 import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.SlmAppFlowLease
 import com.pocketfinancer.data.model.SmsSourceIdentity
-import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.inference.SlmLease
@@ -50,11 +49,12 @@ data class SyncSmsItem(
     val body: String,
     val date: Long,
     val messageType: Int = 1,
+    val sourceTimestamp: Long = date,
     val sourceIdentity: SmsSourceIdentity = SmsSourceIdentity.androidSms(
         providerMessageId = null,
         sender = sender,
         body = body,
-        sourceTimestamp = date,
+        sourceTimestamp = sourceTimestamp,
         messageType = messageType
     ),
     var status: String,
@@ -102,104 +102,68 @@ internal fun SyncSmsItem.hasDiagnosticSourceEvidence(): Boolean =
     status !in SOURCE_EVIDENCE_DISCARDED_STATUSES &&
         body.isNotBlank()
 
-/**
- * Provider ids are authoritative when both sides have them. Fingerprints are
- * only a bridge for a provider-less broadcast meeting its later provider row;
- * using them between two provider rows would collapse legitimate identical
- * messages that have distinct Android `_id` values.
- */
+/** Content/time fingerprints never establish queue identity. */
 internal fun sameQueuedSmsSource(
     first: SmsSourceIdentity,
     second: SmsSourceIdentity
-): Boolean {
-    if (first.connector != second.connector) return false
-    if (first.messageId == second.messageId) return true
-    if (
-        first.providerMessageId != null &&
-        second.providerMessageId != null
-    ) {
-        return false
-    }
-    val firstFingerprints = setOfNotNull(
-        first.fallbackFingerprint,
-        first.alternateFingerprint
-    )
-    val secondFingerprints = setOfNotNull(
-        second.fallbackFingerprint,
-        second.alternateFingerprint
-    )
-    return firstFingerprints.any(secondFingerprints::contains)
-}
+): Boolean = first.connector == second.connector &&
+    first.providerMessageId != null && second.providerMessageId != null &&
+    first.providerMessageId == second.providerMessageId && first.messageId == second.messageId
 
-private fun List<SyncSmsItem>.distinctSmsSources(): List<SyncSmsItem> {
-    // Provider-backed identities are considered first so one ambiguous
-    // provider-less broadcast can bridge to at most one authoritative row,
-    // never collapse two distinct provider rows.
-    val providerBacked = filter {
-        it.sourceIdentity.providerMessageId != null
-    }
-    val providerLess = filter {
-        it.sourceIdentity.providerMessageId == null
-    }
-    return (providerBacked + providerLess)
-        .fold(mutableListOf()) { distinct, item ->
-            if (
-                distinct.none {
-                    sameQueuedSmsSource(
-                        it.sourceIdentity,
-                        item.sourceIdentity
-                    )
-                }
-            ) {
-                distinct += item
-            }
-            distinct
-        }
-}
+internal fun SyncSmsItem.toSourceMessage(): SmsReader.SmsMessage = SmsReader.SmsMessage(
+    address = sender,
+    body = body,
+    date = date,
+    type = messageType,
+    providerMessageId = sourceIdentity.providerMessageId,
+    sourceTimestamp = sourceTimestamp
+)
+
+internal data class RecentScanQueueMerge(
+    val queue: List<SyncSmsItem>,
+    val scannedCandidateKeys: Set<String>
+)
 
 internal fun mergeRecentScanQueue(
     currentQueue: List<SyncSmsItem>,
     providerMessages: List<SmsReader.SmsMessage>
-): List<SyncSmsItem> {
-    val unmatchedCurrent = currentQueue.toMutableList()
-    val scanned = providerMessages.map { message ->
+): List<SyncSmsItem> = mergeRecentScanQueueWithCoverage(currentQueue, providerMessages).queue
+
+internal fun mergeRecentScanQueueWithCoverage(
+    currentQueue: List<SyncSmsItem>,
+    providerMessages: List<SmsReader.SmsMessage>
+): RecentScanQueueMerge {
+    val queued = currentQueue.toMutableList()
+    val scannedKeys = mutableSetOf<String>()
+    for (message in providerMessages) {
         val source = message.sourceIdentity
-        val exactIndex = unmatchedCurrent.indexOfFirst {
-            it.sourceIdentity.connector == source.connector &&
-                it.sourceIdentity.messageId == source.messageId
+        // Preserve the exact queue item/attempt only for trustworthy identity
+        // AND unchanged evidence. Conflicting evidence must reach admission.
+        val existing = queued.firstOrNull {
+            sameQueuedSmsSource(it.sourceIdentity, source) &&
+                it.sourceIdentity == source && it.toSourceMessage() == message
         }
-        val bridgeIndex = if (exactIndex >= 0) {
-            -1
-        } else {
-            unmatchedCurrent.indexOfFirst {
-                sameQueuedSmsSource(it.sourceIdentity, source)
-            }
+        if (existing != null) {
+            scannedKeys += existing.id
+            continue
         }
-        val matchedIndex = exactIndex.takeIf { it >= 0 } ?: bridgeIndex
-        val existing = matchedIndex
-            .takeIf { it >= 0 }
-            ?.let(unmatchedCurrent::removeAt)
-        if (
-            existing != null &&
-            existing.sourceIdentity.providerMessageId != null
-        ) {
-            existing
-        } else {
-            // A provider row enriches the one provider-less queue item it can
-            // unambiguously consume. Its authoritative id then keeps any
-            // second byte-identical provider row distinct.
-            SyncSmsItem(
-                id = source.opaqueCandidateKey,
-                sender = message.address,
-                body = message.body,
-                date = message.date,
-                messageType = message.type,
-                sourceIdentity = source,
-                status = existing?.status ?: "pending"
-            )
-        }
+        val preferredKey = source.opaqueCandidateKey
+        val item = SyncSmsItem(
+            id = if (source.providerMessageId != null && queued.none { it.id == preferredKey }) {
+                preferredKey
+            } else "sms_queue_${UUID.randomUUID()}",
+            sender = message.address,
+            body = message.body,
+            date = message.date,
+            messageType = message.type,
+            sourceTimestamp = message.sourceTimestamp,
+            sourceIdentity = source,
+            status = "pending"
+        )
+        queued += item
+        scannedKeys += item.id
     }
-    return (scanned + unmatchedCurrent).distinctSmsSources()
+    return RecentScanQueueMerge(queued, scannedKeys)
 }
 
 data class HomeSyncState(
@@ -259,7 +223,6 @@ internal data class ManualSmsTelemetryOwner(
 class HomeSyncManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val smsRepository: SmsRepository,
-    private val transactionRepository: TransactionRepository,
     private val slmRuntime: SlmRuntime,
     private val appFlowCoordinator: SlmAppFlowCoordinator,
     private val modelStorage: SlmModelStorage,
@@ -729,10 +692,7 @@ class HomeSyncManager @Inject constructor(
                 for (message in rawMessages) {
                     ensureRunCanContinue(runId)
                     if (
-                        !transactionRepository.preserveSourceMetadataIfExists(
-                            sourceIdentity = message.sourceIdentity,
-                            receivedDate = message.date
-                        )
+                        !pipelineService.hasVerifiedSavedSource(message)
                     ) {
                         unsyncedMessages += message
                     }
@@ -742,16 +702,13 @@ class HomeSyncManager @Inject constructor(
                     publishRecentPermissionNeeded()
                     return@withLock
                 }
-                val scannedCandidateKeys = unsyncedMessages
-                    .mapTo(mutableSetOf()) {
-                        it.sourceIdentity.opaqueCandidateKey
-                    }
+                var scannedCandidateKeys: Set<String> = emptySet()
+                var scanPublished = false
                 val loadedModel = slmRuntime.state.value.loadedModel
                 val completedAt = System.currentTimeMillis()
                 synchronized(recentScanTrackingLock) {
-                    recentScanCandidateKeys = scannedCandidateKeys
-                    recentScanCompletedAtMillis = completedAt
                     _syncState.update { current ->
+                        scanPublished = false
                         if (
                             runId != null &&
                             (
@@ -766,13 +723,15 @@ class HomeSyncManager @Inject constructor(
                             // Build from the queue owned by this exact CAS
                             // retry. Incoming candidates may be appended while
                             // repository identity checks are in flight.
-                            val latestQueue = mergeRecentScanQueue(
+                            val merged = mergeRecentScanQueueWithCoverage(
                                 currentQueue = current.queue.filter {
                                     it.status == "pending" ||
                                         it.status == "syncing"
                                 },
                                 providerMessages = unsyncedMessages
                             )
+                            scannedCandidateKeys = merged.scannedCandidateKeys
+                            scanPublished = true
                             HomeSyncState(
                                 status = if (runId == null) {
                                     HomeSyncState.Status.IDLE
@@ -782,7 +741,7 @@ class HomeSyncManager @Inject constructor(
                                 activeRunId = current.activeRunId,
                                 cancellationRequested =
                                     current.cancellationRequested,
-                                queue = latestQueue,
+                                queue = merged.queue,
                                 activeModelName = loadedModel?.modelPath
                                     ?.let { File(it).name },
                                 recentScanOutcome =
@@ -791,6 +750,10 @@ class HomeSyncManager @Inject constructor(
                                 lastSuccessfulScanMillis = completedAt
                             )
                         }
+                    }
+                    if (scanPublished) {
+                        recentScanCandidateKeys = scannedCandidateKeys
+                        recentScanCompletedAtMillis = completedAt
                     }
                 }
                 ensureRunCanContinue(runId)
@@ -1091,16 +1054,8 @@ class HomeSyncManager @Inject constructor(
 
                 val item = _syncState.value.queue[index]
 
-                if (
-                    transactionRepository.preserveSourceMetadataIfExists(
-                        sourceIdentity = item.sourceIdentity,
-                        receivedDate = item.date
-                    )
-                ) {
-                    ensureRunCanContinue(runId)
-                    updateItemStatus(index, "already_saved", runId)
-                    continue
-                }
+                // Normal processing rechecks reliable identity and immutable
+                // evidence atomically; discovery is not permission to settle.
                 try {
                     updateRunState(runId) { state ->
                         state.copy(currentStageIndex = 1)
@@ -1132,15 +1087,7 @@ class HomeSyncManager @Inject constructor(
                     )
                     val result = try {
                         pipelineService.processSingle(
-                            sms = SmsReader.SmsMessage(
-                                address = item.sender,
-                                body = item.body,
-                                date = item.date,
-                                type = item.messageType,
-                                providerMessageId =
-                                    item.sourceIdentity.providerMessageId,
-                                sourceTimestamp = item.date
-                            ),
+                            sms = item.toSourceMessage(),
                             lease = batchLease,
                             observer = processingObserver,
                             trigger = "manual"
@@ -1417,28 +1364,8 @@ class HomeSyncManager @Inject constructor(
             }
             completedAt to recentScanCandidateKeys
         } ?: return
-        val expectedScanCompletedAt = tracking.first
-        val tracked = queue.filter { it.id in tracking.second }
-        val processed = tracked.count { it.status in TERMINAL_ITEM_STATUSES }
-        val saved = tracked.count {
-            it.status == "synced" || it.status == "already_saved"
-        }
-        val rejected = tracked.count { it.status == "filtered_out" }
-        val failed = tracked.count { it.status == "error" }
         setupImportStore.update { state ->
-            if (
-                state.lastSuccessfulRecentScanMillis !=
-                    expectedScanCompletedAt
-            ) {
-                state
-            } else {
-                state.copy(
-                    recentProcessedCount = processed,
-                    recentSavedCount = saved,
-                    recentRejectedCount = rejected,
-                    recentFailedCount = failed
-                )
-            }
+            state.withRecentProcessingProgress(queue, tracking.second, tracking.first)
         }
     }
 
@@ -1533,12 +1460,6 @@ class HomeSyncManager @Inject constructor(
             HomeSyncState.Status.SYNCING,
             HomeSyncState.Status.CANCELLING
         )
-        val TERMINAL_ITEM_STATUSES = setOf(
-            "synced",
-            "already_saved",
-            "filtered_out",
-            "error"
-        )
     }
 }
 
@@ -1573,6 +1494,23 @@ internal fun settledManualSyncCancellation(
         jsonOutputTruncated = false,
         activeSmsPerformance = null,
         syncError = null
+    )
+}
+
+private val TERMINAL_ITEM_STATUSES = setOf("synced", "already_saved", "filtered_out", "error")
+
+internal fun SetupImportState.withRecentProcessingProgress(
+    queue: List<SyncSmsItem>,
+    candidateKeys: Set<String>,
+    expectedScanCompletedAt: Long
+): SetupImportState {
+    if (lastSuccessfulRecentScanMillis != expectedScanCompletedAt) return this
+    val tracked = queue.filter { it.id in candidateKeys }
+    return copy(
+        recentProcessedCount = tracked.count { it.status in TERMINAL_ITEM_STATUSES },
+        recentSavedCount = tracked.count { it.status == "synced" || it.status == "already_saved" },
+        recentRejectedCount = tracked.count { it.status == "filtered_out" },
+        recentFailedCount = tracked.count { it.status == "error" }
     )
 }
 
