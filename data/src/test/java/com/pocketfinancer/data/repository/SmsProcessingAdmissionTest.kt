@@ -100,7 +100,7 @@ class SmsProcessingAdmissionTest {
     }
 
     @Test
-    fun `ready snapshot becomes visible retryable recovery instead of current settings resnapshot`() = runBlocking {
+    fun `ready snapshot becomes visible retryable recovery instead of current settings resnapshot`(): Unit = runBlocking {
         store.admitSource(source())
         val ready = operation(source().id, configuration = "{\"grammar_enabled\":false}")
         store.createOperation(ready)
