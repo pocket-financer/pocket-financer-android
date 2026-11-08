@@ -199,6 +199,18 @@ class PipelineService @Inject constructor(
         )
     }
 
+    /**
+     * Discovery may skip only a verified, provider-identified saved source.
+     * This does not capture settings, mutate provenance or settle queued work.
+     * All uncertain/conflicting cases must still reach [processSingle].
+     */
+    suspend fun hasVerifiedSavedSource(sms: SmsReader.SmsMessage): Boolean {
+        if (sms.sourceIdentity.providerMessageId == null) return false
+        return smsProcessingStore.verifiedSavedSourceTransactionIds(
+            sourceForAdmission(sms, "discovery", System.currentTimeMillis())
+        ).isNotEmpty()
+    }
+
     suspend fun retryReview(reviewCaseId: String, configurationMode: String): ProcessingResult = try {
         retryReviewInternal(reviewCaseId, configurationMode)
     } catch (_: SmsAdmissionBusyException) {
@@ -339,33 +351,9 @@ class PipelineService @Inject constructor(
         observer: ProcessingObserver?
     ): ProcessingResult {
         require(trigger != "retry") { "Extraction retry requires an existing Review parent" }
-        val sourceIdentity = sms.sourceIdentity
-        // A broadcast's content/time fingerprint is not connector identity.
-        // Only a provider _id authorizes cross-invocation outcome reuse here.
-        val reliableIdentity = sourceIdentity.providerMessageId != null
-        val sourceId = if (reliableIdentity) sourceIdentity.opaqueCandidateKey else
-            "sms_import_${UUID.randomUUID()}"
-        val receiptId = UUID.nameUUIDFromBytes(sourceId.toByteArray(Charsets.UTF_8)).toString()
         val now = System.currentTimeMillis()
         var createdSnapshot: SmsV5OperationSnapshot? = null
-        val admission = store.admitForProcessing(
-            AdmittedSmsSourceEntity(
-                id = sourceId,
-                sourceConnector = sourceIdentity.connector,
-                sourceMessageId = if (reliableIdentity) sourceIdentity.messageId else "import:$sourceId",
-                sourceProviderMessageId = sourceIdentity.providerMessageId,
-                sourceFingerprint = sourceIdentity.fallbackFingerprint,
-                sourceAlternateFingerprint = sourceIdentity.alternateFingerprint,
-                sender = sms.address,
-                rawMessage = sms.body,
-                sourceTimestamp = sms.sourceTimestamp,
-                messageType = sms.type,
-                origin = trigger,
-                admissionReceiptId = receiptId,
-                admittedAt = now,
-                retentionState = "admitted"
-            )
-        ) { storedSource ->
+        val admission = store.admitForProcessing(sourceForAdmission(sms, trigger, now)) { storedSource ->
             val currency = configurationRepository.confirmedPrimaryCurrency()
                 ?: return@admitForProcessing null
             createdSnapshot = v5SnapshotFactory.create(
@@ -470,6 +458,34 @@ class PipelineService @Inject constructor(
             reference, snapshot, admission.claim, lease, automaticObserver
         )
         return mapOutcome(outcome).also(::publishResult)
+    }
+
+    private fun sourceForAdmission(
+        sms: SmsReader.SmsMessage,
+        trigger: String,
+        now: Long
+    ): AdmittedSmsSourceEntity {
+        val identity = sms.sourceIdentity
+        // A content/time fingerprint is evidence integrity, not connector identity.
+        val reliableIdentity = identity.providerMessageId != null
+        val sourceId = if (reliableIdentity) identity.opaqueCandidateKey else
+            "sms_import_${UUID.randomUUID()}"
+        return AdmittedSmsSourceEntity(
+            id = sourceId,
+            sourceConnector = identity.connector,
+            sourceMessageId = if (reliableIdentity) identity.messageId else "import:$sourceId",
+            sourceProviderMessageId = identity.providerMessageId,
+            sourceFingerprint = identity.fallbackFingerprint,
+            sourceAlternateFingerprint = identity.alternateFingerprint,
+            sender = sms.address,
+            rawMessage = sms.body,
+            sourceTimestamp = sms.sourceTimestamp,
+            messageType = sms.type,
+            origin = trigger,
+            admissionReceiptId = UUID.nameUUIDFromBytes(sourceId.toByteArray(Charsets.UTF_8)).toString(),
+            admittedAt = now,
+            retentionState = "admitted"
+        )
     }
 
     private fun existingAdmissionResult(admission: SmsProcessingAdmission): ProcessingResult = when (admission) {

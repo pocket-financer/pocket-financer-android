@@ -395,6 +395,87 @@ class SmsProcessingAdmissionTest {
         assertEquals(4, count("sms_processing_operations"))
     }
 
+    @Test
+    fun `discovery reuses only exact provider ledger evidence without writing source or metadata`() = runBlocking {
+        val incoming = source()
+        assertEquals(emptyList(), store.verifiedSavedSourceTransactionIds(incoming))
+        val saved = ledgerTransaction(incoming)
+        database.transactionDao().insert(saved)
+
+        assertEquals(listOf(saved.id), store.verifiedSavedSourceTransactionIds(incoming))
+        assertEquals(0, count("sms_admitted_sources"))
+        assertEquals(0, count("sms_processing_operations"))
+        assertEquals(0, count("sms_review_cases"))
+        assertEquals(listOf(saved), database.smsProcessingDao().getTransactionsForSourceIdentity(
+            incoming.sourceConnector, incoming.sourceMessageId
+        ))
+    }
+
+    @Test
+    fun `discovery never bridges identical fingerprints across ids or provider less deliveries`() = runBlocking {
+        val incoming = source()
+        val saved = ledgerTransaction(incoming)
+        database.transactionDao().insert(saved)
+        assertEquals(incoming.sourceFingerprint, source("other-provider").sourceFingerprint)
+
+        assertEquals(emptyList(), store.verifiedSavedSourceTransactionIds(source("other-provider")))
+        assertEquals(emptyList(), store.verifiedSavedSourceTransactionIds(incoming.copy(
+            sourceProviderMessageId = null
+        )))
+        assertEquals(emptyList(), store.verifiedSavedSourceTransactionIds(incoming.copy(
+            sourceMessageId = "fallback:${incoming.sourceFingerprint}", sourceProviderMessageId = null
+        )))
+        assertEquals(0, count("sms_admitted_sources"))
+        assertEquals(listOf(saved), database.smsProcessingDao().getTransactionsForSourceIdentity(
+            incoming.sourceConnector, incoming.sourceMessageId
+        ))
+    }
+
+    @Test
+    fun `discovery conflicts remain eligible for admission without poisoning ledger only evidence`() = runBlocking {
+        val original = source()
+        val saved = ledgerTransaction(original)
+        database.transactionDao().insert(saved)
+        val conflicts = listOf(
+            original.copy(rawMessage = "Different invented text"),
+            original.copy(sender = "OTHER-SYNTH"),
+            source(sourceTimestamp = SOURCE_TIME + 1),
+            source(messageType = 2)
+        )
+        for (incoming in conflicts) {
+            assertEquals(emptyList(), store.verifiedSavedSourceTransactionIds(incoming))
+            assertEquals(SmsProcessingAdmission.Conflict, store.admitForProcessing(incoming) {
+                error("A discovered conflict must not capture settings or start inference")
+            })
+        }
+        assertEquals(0, count("sms_admitted_sources"))
+        assertEquals(0, count("sms_processing_operations"))
+        assertEquals(listOf(saved.id), store.verifiedSavedSourceTransactionIds(original))
+    }
+
+    @Test
+    fun `discovery cannot hide active work behind a saved parent or mutate stored evidence`() = runBlocking {
+        val first = admit()
+        val saved = ledgerTransaction(first.source)
+        database.transactionDao().insert(saved)
+        assertEquals(emptyList(), store.verifiedSavedSourceTransactionIds(first.source))
+        val operationBefore = database.smsProcessingDao().getOperation(first.operation.id)
+        store.retainForReview(first.claim, listOf("runtime_unavailable"), now())
+        assertEquals(listOf(saved.id), store.verifiedSavedSourceTransactionIds(first.source))
+        assertEquals(emptyList(), store.verifiedSavedSourceTransactionIds(first.source.copy(
+            rawMessage = "Conflicting invented source"
+        )))
+        val settled = database.smsProcessingDao().getOperation(first.operation.id)!!
+        val child = operation(first.source.id).copy(
+            parentOperationId = settled.id, stableEventId = settled.stableEventId, trigger = "retry"
+        )
+        store.createRetryOperationAndClaim(child)
+        assertEquals(emptyList(), store.verifiedSavedSourceTransactionIds(first.source))
+        assertEquals(first.source, database.smsProcessingDao().getSource(first.source.id))
+        assertEquals(first.claim.ownerToken, operationBefore?.ownerToken)
+        assertEquals(2, count("sms_processing_operations"))
+    }
+
     private fun ledgerTransaction(source: AdmittedSmsSourceEntity) = TransactionEntity(
         id = "invented-legacy-transaction", amount = 10.0, merchant = "Invented shop", date = SOURCE_TIME,
         type = "debit", accountId = "invented-account", rawMessage = source.rawMessage,

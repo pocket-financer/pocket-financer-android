@@ -11,7 +11,6 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.hardware.isPublishedModelArtifact
@@ -97,9 +96,6 @@ class OnboardingService : Service() {
 
     @Inject
     lateinit var pipelineService: PipelineService
-
-    @Inject
-    lateinit var transactionRepository: TransactionRepository
 
     @Inject
     lateinit var setupImportStore: SetupImportStore
@@ -1405,11 +1401,7 @@ class OnboardingService : Service() {
                     for (message in deterministicallyEligible) {
                         currentCoroutineContext().ensureActive()
                         if (
-                            !transactionRepository
-                                .preserveSourceMetadataIfExists(
-                                    sourceIdentity = message.sourceIdentity,
-                                    receivedDate = message.date
-                                )
+                            !pipelineService.hasVerifiedSavedSource(message)
                         ) {
                             unsaved += message
                         }

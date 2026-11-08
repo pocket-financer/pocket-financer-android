@@ -192,6 +192,24 @@ class SmsProcessingStore @Inject constructor(
         SmsProcessingAdmission.Claimed(storedSource, operation, claim)
     }
 
+    /**
+     * Read-only discovery at the same source boundary as [admitForProcessing].
+     * An uncertain/conflicting match must reach normal admission, never be
+     * suppressed or promote a content fingerprint into connector identity.
+     */
+    suspend fun verifiedSavedSourceTransactionIds(
+        source: AdmittedSmsSourceEntity
+    ): List<String> = database.withTransaction {
+        if (source.sourceProviderMessageId == null) return@withTransaction emptyList()
+        val stored = dao.getSourceByIdentity(source.sourceConnector, source.sourceMessageId)
+        if (stored != null && (!sameSourceEvidence(stored, source) ||
+                dao.getUnsettledOperationForSource(stored.id) != null)
+        ) return@withTransaction emptyList()
+        val saved = dao.getTransactionsForSourceIdentity(source.sourceConnector, source.sourceMessageId)
+        if (saved.any { !sameLedgerSourceEvidence(it, source) }) return@withTransaction emptyList()
+        saved.map { it.id }
+    }
+
     private fun sameSourceEvidence(
         stored: AdmittedSmsSourceEntity,
         incoming: AdmittedSmsSourceEntity

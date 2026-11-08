@@ -35,6 +35,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -103,6 +104,65 @@ class PipelineServiceTest {
             v4SnapshotFactory, v4Coordinator, v5SnapshotFactory, v5Coordinator,
             grammarPreferences
         )
+    }
+
+    @Test
+    fun `discovery checks reliable saved evidence without settings snapshots or runtime calls`() = runTest {
+        val checked = mutableListOf<AdmittedSmsSourceEntity>()
+        coEvery { store.verifiedSavedSourceTransactionIds(any()) } coAnswers {
+            checked += arg<AdmittedSmsSourceEntity>(0)
+            listOf("saved-transaction")
+        }
+        val sms = message().copy(sourceTimestamp = message().date - 5_000L)
+
+        assertTrue(pipeline.hasVerifiedSavedSource(sms))
+
+        val source = checked.single()
+        assertEquals(sms.sourceIdentity.opaqueCandidateKey, source.id)
+        assertEquals(sms.sourceIdentity.messageId, source.sourceMessageId)
+        assertEquals(sms.sourceIdentity.fallbackFingerprint, source.sourceFingerprint)
+        assertEquals(sms.sourceIdentity.alternateFingerprint, source.sourceAlternateFingerprint)
+        assertEquals(sms.address, source.sender)
+        assertEquals(sms.body, source.rawMessage)
+        assertEquals(sms.sourceTimestamp, source.sourceTimestamp)
+        assertEquals(sms.type, source.messageType)
+        coVerify(exactly = 0) { store.admitForProcessing(any(), any()) }
+        verify(exactly = 0) { configuration.confirmedPrimaryCurrency() }
+        verify(exactly = 0) { grammarPreferences.gbnfGrammarEnabled }
+        assertNoNewExtraction()
+    }
+
+    @Test
+    fun `provider less discovery bypasses outcome lookup and unknown provider reaches admission`() = runTest {
+        coEvery { store.verifiedSavedSourceTransactionIds(any()) } returns emptyList()
+
+        assertFalse(pipeline.hasVerifiedSavedSource(message().copy(providerMessageId = null)))
+        coVerify(exactly = 0) { store.verifiedSavedSourceTransactionIds(any()) }
+        assertFalse(pipeline.hasVerifiedSavedSource(message()))
+        coVerify(exactly = 1) { store.verifiedSavedSourceTransactionIds(any()) }
+        coVerify(exactly = 0) { store.admitForProcessing(any(), any()) }
+        verify(exactly = 0) { configuration.confirmedPrimaryCurrency() }
+        assertNoNewExtraction()
+    }
+
+    @Test
+    fun `discovery and normal admission share provider source evidence with distinct timestamps`() = runTest {
+        val sms = message().copy(sourceTimestamp = message().date - 5_000L)
+        var discovered: AdmittedSmsSourceEntity? = null
+        coEvery { store.verifiedSavedSourceTransactionIds(any()) } coAnswers {
+            discovered = arg(0)
+            emptyList()
+        }
+        every { configuration.confirmedPrimaryCurrency() } returns null
+
+        assertFalse(pipeline.hasVerifiedSavedSource(sms))
+        assertEquals(PipelineService.ProcessingResult.AwaitingConfiguration, pipeline.processSingle(sms))
+
+        val admitted = admittedSources.single()
+        assertEquals(admitted.copy(
+            origin = "discovery", admittedAt = checkNotNull(discovered).admittedAt
+        ), discovered)
+        assertNoNewExtraction()
     }
 
     @Test

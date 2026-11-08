@@ -1207,8 +1207,10 @@ class TrustworthyHomeStateTest {
         )
 
         assertFalse(sameQueuedSmsSource(first, second))
-        assertTrue(sameQueuedSmsSource(first, broadcast))
-        assertTrue(sameQueuedSmsSource(second, broadcast))
+        assertFalse(sameQueuedSmsSource(first, broadcast))
+        assertFalse(sameQueuedSmsSource(second, broadcast))
+        assertFalse(sameQueuedSmsSource(broadcast, broadcast))
+        assertFalse(sameQueuedSmsSource(first, first.copy(connector = "other_connector")))
 
         val merged = mergeRecentScanQueue(
             currentQueue = listOf(
@@ -1238,13 +1240,134 @@ class TrustworthyHomeStateTest {
                 )
             )
         )
-        assertEquals(2, merged.size)
+        assertEquals(3, merged.size)
+        assertEquals(broadcast, merged.first().sourceIdentity)
+        assertEquals(3, merged.map { it.id }.toSet().size)
         assertEquals(
             setOf("provider-1", "provider-2"),
             merged.mapNotNull {
                 it.sourceIdentity.providerMessageId
             }.toSet()
         )
+    }
+
+    @Test
+    fun `repeat provider scan preserves exact queued attempt and distinct source timestamps`() {
+        val message = com.pocketfinancer.sms.SmsReader.SmsMessage(
+            address = "SYNTH", body = "Invented alert", date = 6_000L,
+            type = 1, providerMessageId = "invented-provider", sourceTimestamp = 1_000L
+        )
+        val first = mergeRecentScanQueue(emptyList(), listOf(message)).single()
+            .copy(status = "syncing")
+
+        val repeated = mergeRecentScanQueue(listOf(first), listOf(message, message))
+
+        assertEquals(1, repeated.size)
+        assertSame(first, repeated.single())
+        assertEquals(message, first.toSourceMessage())
+        assertEquals(message.sourceIdentity, first.toSourceMessage().sourceIdentity)
+        assertEquals(1_000L, first.sourceTimestamp)
+        assertEquals(6_000L, first.date)
+    }
+
+    @Test
+    fun `provider identity conflict keeps each evidence variant for authoritative admission`() {
+        val original = com.pocketfinancer.sms.SmsReader.SmsMessage(
+            address = "SYNTH", body = "Invented alert", date = 1_000L,
+            type = 1, providerMessageId = "invented-provider"
+        )
+        val first = mergeRecentScanQueue(emptyList(), listOf(original)).single()
+        val conflicting = listOf(
+            original.copy(body = "Different invented alert"),
+            original.copy(address = "OTHER-SYNTH"),
+            original.copy(type = 2),
+            original.copy(sourceTimestamp = 999L),
+            original.copy(date = 1_001L)
+        )
+
+        val queued = mergeRecentScanQueue(listOf(first), conflicting)
+
+        assertEquals(6, queued.size)
+        assertSame(first, queued.first())
+        assertEquals(conflicting, queued.drop(1).map { it.toSourceMessage() })
+        assertEquals(6, queued.map { it.id }.toSet().size)
+        assertTrue(queued.all { it.status == "pending" })
+        assertEquals(queued, mergeRecentScanQueue(queued, listOf(original) + conflicting))
+    }
+
+    @Test
+    fun `identical provider less deliveries never collapse into one queue item`() {
+        val message = com.pocketfinancer.sms.SmsReader.SmsMessage(
+            address = "SYNTH", body = "Invented alert", date = 1_000L, type = 1
+        )
+        val queued = mergeRecentScanQueue(emptyList(), listOf(message, message))
+        val repeated = mergeRecentScanQueue(queued, listOf(message))
+
+        assertEquals(2, queued.size)
+        assertEquals(3, repeated.size)
+        assertEquals(3, repeated.map { it.id }.toSet().size)
+        assertEquals(listOf(message, message, message), repeated.map { it.toSourceMessage() })
+        assertEquals(queued, repeated.take(2))
+    }
+
+    @Test
+    fun `a failed provider less attempt cannot lend its state to an identical provider row`() {
+        val message = com.pocketfinancer.sms.SmsReader.SmsMessage(
+            address = "SYNTH", body = "Invented alert", date = 1_000L, type = 1
+        )
+        val retryable = mergeRecentScanQueue(emptyList(), listOf(message)).single()
+            .copy(status = "error")
+        val provider = message.copy(providerMessageId = "invented-provider")
+
+        val queued = mergeRecentScanQueue(listOf(retryable), listOf(provider))
+
+        assertEquals(2, queued.size)
+        assertSame(retryable, queued.first())
+        assertEquals("pending", queued.last().status)
+        assertEquals(provider, queued.last().toSourceMessage())
+        assertTrue(queued.first().id != queued.last().id)
+    }
+
+    @Test
+    fun `recent scan tracks exact queue ids for conflicts and provider less terminal progress`() {
+        val original = com.pocketfinancer.sms.SmsReader.SmsMessage(
+            address = "SYNTH", body = "Invented alert", date = 1_000L,
+            type = 1, providerMessageId = "invented-provider"
+        )
+        val conflicting = original.copy(body = "Different invented alert")
+        val providerLess = original.copy(providerMessageId = null)
+        val unscanned = mergeRecentScanQueue(emptyList(), listOf(
+            original.copy(providerMessageId = "unscanned-provider")
+        )).single()
+        val current = mergeRecentScanQueue(listOf(unscanned), listOf(original))
+        val merged = mergeRecentScanQueueWithCoverage(current, listOf(original, conflicting, providerLess))
+        val tracked = merged.queue.filter { it.id in merged.scannedCandidateKeys }
+        assertEquals(listOf(original, conflicting, providerLess), tracked.map { it.toSourceMessage() })
+        assertEquals(3, merged.scannedCandidateKeys.size)
+        assertFalse(unscanned.id in merged.scannedCandidateKeys)
+        val scanned = SetupImportState(status = SetupImportStatus.READY).withSuccessfulRecentScan(
+            scanWindowDays = 7, providerMaxDate = 2_000L, completedAt = 3_000L,
+            providerMessageCount = 3, eligibleCandidateCount = merged.scannedCandidateKeys.size
+        )
+        val terminal = merged.queue.map { item ->
+            item.copy(status = if (item.toSourceMessage() == conflicting) "error" else "synced")
+        }
+
+        val progress = scanned.withRecentProcessingProgress(terminal, merged.scannedCandidateKeys, 3_000L)
+
+        assertEquals(3, progress.recentProcessedCount)
+        assertEquals(2, progress.recentSavedCount)
+        assertEquals(1, progress.recentFailedCount)
+        assertFalse(progress.hasIncompleteRecentProcessing)
+        assertTrue(progress.recentProcessingNeedsAttention)
+        assertEquals(2_000L, recentScanProviderMaxDate(progress, 7, 4_000L))
+        val recovered = progress.withRecentProcessingProgress(
+            terminal.map { it.copy(status = "already_saved") }, merged.scannedCandidateKeys, 3_000L
+        )
+        assertEquals(3, recovered.recentSavedCount)
+        assertFalse(recovered.recentProcessingNeedsAttention)
+        assertEquals(4_000L, recentScanProviderMaxDate(recovered, 7, 4_000L))
+        assertSame(scanned, scanned.withRecentProcessingProgress(terminal, merged.scannedCandidateKeys, 2_999L))
     }
 
     @Test
