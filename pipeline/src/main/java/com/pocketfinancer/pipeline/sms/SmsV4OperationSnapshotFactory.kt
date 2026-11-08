@@ -3,6 +3,7 @@ package com.pocketfinancer.pipeline.sms
 import android.content.Context
 import android.os.Build
 import com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity
+import com.pocketfinancer.data.repository.SmsOperationClaim
 import com.pocketfinancer.data.repository.SmsProcessingStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.TimeZone
@@ -50,7 +51,8 @@ data class SmsV4OperationSnapshot(
     val stableEventId: String,
     val configuration: SmsV4OperationConfiguration,
     val configurationJson: String,
-    val configurationHash: String
+    val configurationHash: String,
+    val admissionClaim: SmsOperationClaim? = null
 )
 
 @Singleton
@@ -125,31 +127,35 @@ class SmsV4OperationSnapshotFactory @Inject constructor(
         val hash = SmsProcessingStore.sha256(CanonicalAndroidJson.stringify(payload))
         payload.put("config_hash", hash)
         val json = CanonicalAndroidJson.stringify(payload)
-        store.createOperation(
-            SmsProcessingOperationEntity(
-                id = operationId,
-                sourceId = source.sourceId,
-                parentOperationId = parentOperationId,
-                stableEventId = resolvedStableEventId,
-                trigger = trigger,
-                configurationJson = json,
-                configurationHash = hash,
-                contractReleaseId = configuration.releaseId,
-                state = "ready",
-                transitionSequence = 0,
-                ownerToken = null,
-                ownerGeneration = 0,
-                claimExpiresAt = null,
-                createdAt = now,
-                updatedAt = now,
-                settledAt = null,
-                settlementReceiptJson = null,
-                deletionEpoch = 0
-            )
+        val storedOperation = SmsProcessingOperationEntity(
+            id = operationId,
+            sourceId = source.sourceId,
+            parentOperationId = parentOperationId,
+            stableEventId = resolvedStableEventId,
+            trigger = trigger,
+            configurationJson = json,
+            configurationHash = hash,
+            contractReleaseId = configuration.releaseId,
+            state = "ready",
+            transitionSequence = 0,
+            ownerToken = null,
+            ownerGeneration = 0,
+            claimExpiresAt = null,
+            createdAt = now,
+            updatedAt = now,
+            settledAt = null,
+            settlementReceiptJson = null,
+            deletionEpoch = 0
         )
+        val admissionClaim = if (trigger == "retry") {
+            store.createRetryOperationAndClaim(storedOperation)
+        } else {
+            store.createOperation(storedOperation)
+            null
+        }
         return SmsV4OperationSnapshot(
             operationId, parentOperationId, resolvedStableEventId,
-            configuration, json, hash
+            configuration, json, hash, admissionClaim
         )
     }
 

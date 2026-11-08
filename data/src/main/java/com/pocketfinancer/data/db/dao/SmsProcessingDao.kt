@@ -18,6 +18,7 @@ import com.pocketfinancer.data.db.entity.SmsSelectorAttemptEntity
 import com.pocketfinancer.data.db.entity.SmsSourceMetadataEventEntity
 import com.pocketfinancer.data.db.entity.SmsTraceImportReceiptEntity
 import com.pocketfinancer.data.db.entity.SmsUserFeedbackEventEntity
+import com.pocketfinancer.data.db.entity.TransactionEntity
 
 @Dao
 interface SmsProcessingDao {
@@ -63,8 +64,33 @@ interface SmsProcessingDao {
     @Query("SELECT * FROM sms_admitted_sources WHERE id = :sourceId")
     suspend fun getSource(sourceId: String): AdmittedSmsSourceEntity?
 
+    @Query(
+        "SELECT * FROM sms_admitted_sources " +
+            "WHERE sourceConnector = :connector AND sourceMessageId = :messageId LIMIT 1"
+    )
+    suspend fun getSourceByIdentity(connector: String, messageId: String): AdmittedSmsSourceEntity?
+
+    @Query(
+        "SELECT * FROM transactions " +
+            "WHERE sourceConnector = :connector AND sourceMessageId = :messageId ORDER BY id"
+    )
+    suspend fun getTransactionsForSourceIdentity(connector: String, messageId: String): List<TransactionEntity>
+
     @Query("SELECT * FROM sms_processing_operations WHERE id = :operationId")
     suspend fun getOperation(operationId: String): SmsProcessingOperationEntity?
+
+    @Query(
+        "SELECT * FROM sms_processing_operations WHERE sourceId = :sourceId " +
+            "ORDER BY createdAt DESC, rowid DESC LIMIT 1"
+    )
+    suspend fun getLatestOperationForSource(sourceId: String): SmsProcessingOperationEntity?
+
+    @Query(
+        "SELECT * FROM sms_processing_operations WHERE sourceId = :sourceId " +
+            "AND settledAt IS NULL AND state != 'interrupted' " +
+            "ORDER BY createdAt DESC, rowid DESC LIMIT 1"
+    )
+    suspend fun getUnsettledOperationForSource(sourceId: String): SmsProcessingOperationEntity?
 
     @Query("SELECT * FROM sms_processing_analyses WHERE operationId = :operationId LIMIT 1")
     suspend fun getAnalysis(operationId: String): SmsProcessingAnalysisEntity?
@@ -198,12 +224,8 @@ interface SmsProcessingDao {
             updatedAt = :now
         WHERE id = :operationId
           AND settledAt IS NULL
-          AND (
-            ownerToken IS NULL
-            OR ownerToken = :ownerToken
-            OR claimExpiresAt IS NULL
-            OR claimExpiresAt <= :now
-          )
+          AND state = 'ready'
+          AND ownerToken IS NULL
         """
     )
     suspend fun claim(

@@ -95,6 +95,27 @@ class SmsAutomaticPersistenceConflict(message: String) : IllegalStateException(m
 
 class SmsProcessingStoreException(message: String) : IllegalStateException(message)
 
+class SmsAdmissionBusyException : IllegalStateException("This source already has active processing")
+
+sealed interface SmsProcessingAdmission {
+    data class Claimed(
+        val source: AdmittedSmsSourceEntity,
+        val operation: SmsProcessingOperationEntity,
+        val claim: SmsOperationClaim
+    ) : SmsProcessingAdmission
+
+    data class Existing(
+        val operation: SmsProcessingOperationEntity,
+        val reviewCaseId: String?,
+        val reviewState: String? = null
+    ) : SmsProcessingAdmission
+
+    data class Saved(val transactionIds: List<String>) : SmsProcessingAdmission
+    data class Busy(val operationId: String) : SmsProcessingAdmission
+    data object Conflict : SmsProcessingAdmission
+    data object AwaitingConfiguration : SmsProcessingAdmission
+}
+
 @Singleton
 class SmsProcessingStore @Inject constructor(
     private val database: AppDatabase,
@@ -110,10 +131,90 @@ class SmsProcessingStore @Inject constructor(
         check(
             stored.sourceConnector == source.sourceConnector &&
                 stored.sourceMessageId == source.sourceMessageId &&
-                stored.sourceFingerprint == source.sourceFingerprint
+                sameSourceEvidence(stored, source)
         ) { "Admitted SMS source identity conflict" }
         return inserted
     }
+
+    /**
+     * Lookup, immutable evidence check, snapshot creation and first claim share
+     * one Room transaction. The callback runs only for a genuinely new source
+     * operation; it must not run inference or acquire a runtime lease.
+     */
+    suspend fun admitForProcessing(
+        source: AdmittedSmsSourceEntity,
+        createOperation: suspend (AdmittedSmsSourceEntity) -> String?
+    ): SmsProcessingAdmission = database.withTransaction {
+        val existingSource = dao.getSourceByIdentity(source.sourceConnector, source.sourceMessageId)
+        if (existingSource != null && !sameSourceEvidence(existingSource, source)) {
+            return@withTransaction SmsProcessingAdmission.Conflict
+        }
+        val activeOperation = existingSource?.let { dao.getUnsettledOperationForSource(it.id) }
+        val saved = if (activeOperation == null) {
+            dao.getTransactionsForSourceIdentity(source.sourceConnector, source.sourceMessageId)
+        } else emptyList()
+        // A rejected legacy-ledger delivery must not establish source evidence.
+        if (saved.any { !sameLedgerSourceEvidence(it, source) }) {
+            return@withTransaction SmsProcessingAdmission.Conflict
+        }
+        val storedSource = existingSource ?: run {
+            admitSource(source)
+            dao.getSource(source.id) ?: error("Admitted SMS source disappeared")
+        }
+        if (saved.isNotEmpty()) {
+            return@withTransaction SmsProcessingAdmission.Saved(saved.map { it.id })
+        }
+        val existingOperation = activeOperation ?: dao.getLatestOperationForSource(storedSource.id)
+        if (existingOperation != null) {
+            val now = System.currentTimeMillis()
+            if (existingOperation.settledAt == null && existingOperation.state != "interrupted") {
+                if (existingOperation.ownerToken != null &&
+                    (existingOperation.claimExpiresAt ?: Long.MIN_VALUE) > now
+                ) {
+                    return@withTransaction SmsProcessingAdmission.Busy(existingOperation.id)
+                }
+                // Old ready snapshots are not executable here. Recover visibly
+                // instead of silently capturing today's settings on replay.
+                retainUnownedForReview(existingOperation.id, "operation_interrupted", now)
+            }
+            val review = dao.getReviewCaseForOperation(existingOperation.id)
+            return@withTransaction SmsProcessingAdmission.Existing(
+                dao.getOperation(existingOperation.id) ?: error("Processing operation disappeared"),
+                review?.id,
+                review?.state
+            )
+        }
+        val operationId = createOperation(storedSource)
+            ?: return@withTransaction SmsProcessingAdmission.AwaitingConfiguration
+        val operation = dao.getOperation(operationId) ?: error("Processing snapshot was not persisted")
+        check(operation.sourceId == storedSource.id && operation.parentOperationId == null)
+        val claim = claim(operationId, System.currentTimeMillis())
+        SmsProcessingAdmission.Claimed(storedSource, operation, claim)
+    }
+
+    private fun sameSourceEvidence(
+        stored: AdmittedSmsSourceEntity,
+        incoming: AdmittedSmsSourceEntity
+    ): Boolean = stored.sourceFingerprint == incoming.sourceFingerprint &&
+        stored.sourceProviderMessageId == incoming.sourceProviderMessageId &&
+        stored.sourceTimestamp == incoming.sourceTimestamp &&
+        stored.messageType == incoming.messageType &&
+        // Existing terminal-none retention erased these fields. Its retained
+        // fingerprint is an integrity check, never the lookup identity.
+        (stored.retentionState == "terminally_discarded" ||
+            (stored.rawMessage == incoming.rawMessage && stored.sender == incoming.sender))
+
+    private fun sameLedgerSourceEvidence(
+        stored: TransactionEntity,
+        incoming: AdmittedSmsSourceEntity
+    ): Boolean = stored.rawMessage == incoming.rawMessage && stored.sender == incoming.sender &&
+        // Fingerprints retain source time/type even when the owner edits date.
+        // The alternate is the existing sent/received timestamp compatibility alias.
+        (stored.sourceFingerprint == incoming.sourceFingerprint ||
+            stored.sourceFingerprint == incoming.sourceAlternateFingerprint ||
+            (stored.sourceAlternateFingerprint != null &&
+                (stored.sourceAlternateFingerprint == incoming.sourceFingerprint ||
+                    stored.sourceAlternateFingerprint == incoming.sourceAlternateFingerprint)))
 
     suspend fun sourceEvidence(sourceId: String): SmsSourceEvidence {
         val source = dao.getSource(sourceId)
@@ -141,14 +242,15 @@ class SmsProcessingStore @Inject constructor(
     suspend fun reviewV2Extension(reviewCaseId: String): SmsReviewCaseV2ExtensionEntity? =
         dao.getReviewCaseV2Extension(reviewCaseId)
 
-    suspend fun retryContext(reviewCaseId: String): SmsReviewRetryContext {
+    suspend fun retryContext(reviewCaseId: String): SmsReviewRetryContext = database.withTransaction {
         val review = dao.getReviewCase(reviewCaseId)
             ?: throw SmsProcessingStoreException("Review case not found")
         val source = dao.getSource(review.sourceId)
             ?: throw SmsProcessingStoreException("Admitted SMS source not found")
         val operation = dao.getOperation(review.currentOperationId)
             ?: throw SmsProcessingStoreException("Processing operation not found")
-        return SmsReviewRetryContext(review.id, source, operation)
+        if (dao.getUnsettledOperationForSource(source.id) != null) throw SmsAdmissionBusyException()
+        SmsReviewRetryContext(review.id, source, operation)
     }
 
     /**
@@ -192,9 +294,27 @@ class SmsProcessingStore @Inject constructor(
                 ) { "Operation identity was reused with different immutable input" }
                 return@withTransaction
             }
+            if (operation.trigger == "retry") {
+                val parent = operation.parentOperationId?.let { dao.getOperation(it) }
+                    ?: error("An extraction retry requires its preserved parent")
+                check(parent.sourceId == operation.sourceId && parent.stableEventId == operation.stableEventId)
+                if (dao.getUnsettledOperationForSource(operation.sourceId) != null) {
+                    throw SmsAdmissionBusyException()
+                }
+                if (dao.getLatestOperationForSource(operation.sourceId)?.id != parent.id) {
+                    throw SmsProcessingStoreException("The source outcome changed before extraction retry")
+                }
+            }
             dao.insertOperation(operation)
         }
     }
+
+    suspend fun createRetryOperationAndClaim(operation: SmsProcessingOperationEntity): SmsOperationClaim =
+        database.withTransaction {
+            require(operation.trigger == "retry")
+            createOperation(operation)
+            claim(operation.id, System.currentTimeMillis())
+        }
 
     suspend fun claim(operationId: String, now: Long): SmsOperationClaim {
         val ownerToken = UUID.randomUUID().toString()

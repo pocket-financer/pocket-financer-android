@@ -13,7 +13,6 @@ import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.PipelineService
-import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.setup.AdaptiveHistoryScanPolicy
 import com.pocketfinancer.setup.SetupActionableError
 import com.pocketfinancer.setup.SetupImportState
@@ -260,7 +259,6 @@ internal data class ManualSmsTelemetryOwner(
 class HomeSyncManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val smsRepository: SmsRepository,
-    private val smsFilterPipeline: SmsFilterPipeline,
     private val transactionRepository: TransactionRepository,
     private val slmRuntime: SlmRuntime,
     private val appFlowCoordinator: SlmAppFlowCoordinator,
@@ -724,14 +722,11 @@ class HomeSyncManager @Inject constructor(
                     maxDate = providerMaxDate
                 )
                 ensureRunCanContinue(runId)
-                val transactional = rawMessages.filter { message ->
-                    smsFilterPipeline.isTransactional(
-                        message.address,
-                        message.body
-                    )
-                }
+                // Do not let legacy sender/amount/account/OTP rules reject
+                // messages ahead of the common durable admission boundary.
+                // Terminal conservative exclusions await the retention contract.
                 val unsyncedMessages = mutableListOf<SmsReader.SmsMessage>()
-                for (message in transactional) {
+                for (message in rawMessages) {
                     ensureRunCanContinue(runId)
                     if (
                         !transactionRepository.preserveSourceMetadataIfExists(

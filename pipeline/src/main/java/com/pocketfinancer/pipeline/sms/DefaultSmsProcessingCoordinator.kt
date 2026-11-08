@@ -68,6 +68,8 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
         observer: SmsProcessingObserver,
         preferredLease: com.pocketfinancer.inference.SlmLease?
     ): SmsProcessingOutcome {
+        val initialClaim = operation.admissionClaim
+        require(initialClaim == null || initialClaim.operationId == operation.operationId)
         if (
             source.sourceId != operation.configuration.sourceId ||
             SmsProcessingStore.sha256(source.sourceId) !=
@@ -84,13 +86,19 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
         ) {
             // configurationHash covers the payload before its self-describing hash field;
             // equality here would indicate the wrong hashing boundary was used.
+            if (initialClaim != null) {
+                return retainOwned(
+                    initialClaim, operation,
+                    listOf("persistence_configuration_hash_mismatch"), observer
+                )
+            }
             return retainWithoutClaim(
                 operation,
                 listOf("persistence_configuration_hash_mismatch")
             )
         }
         settledOutcome(operation)?.let { return it }
-        val claim = try {
+        val claim = initialClaim ?: try {
             store.claim(operation.operationId, System.currentTimeMillis())
         } catch (_: Exception) {
             return retainWithoutClaim(operation, listOf("persistence_claim_ownership_invalid"))
