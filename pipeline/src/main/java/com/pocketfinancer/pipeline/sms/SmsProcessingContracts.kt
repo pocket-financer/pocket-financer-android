@@ -1,5 +1,6 @@
 package com.pocketfinancer.pipeline.sms
 
+import com.pocketfinancer.data.repository.SmsOperationClaim
 import com.pocketfinancer.inference.DirectCandidateSelectorResult
 import com.pocketfinancer.inference.SlmModelSpec
 
@@ -49,7 +50,8 @@ data class SmsOperationSnapshot(
     val stableEventId: String,
     val configuration: SmsOperationConfiguration,
     val configurationJson: String,
-    val configurationHash: String
+    val configurationHash: String,
+    val admissionClaim: SmsOperationClaim? = null
 )
 
 data class SmsEvidenceSpan(

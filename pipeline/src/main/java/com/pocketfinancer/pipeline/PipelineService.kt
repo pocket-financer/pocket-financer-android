@@ -2,7 +2,10 @@ package com.pocketfinancer.pipeline
 
 import com.pocketfinancer.data.db.entity.AdmittedSmsSourceEntity
 import com.pocketfinancer.data.repository.ProcessingConfigurationRepository
+import com.pocketfinancer.data.repository.SmsAdmissionBusyException
+import com.pocketfinancer.data.repository.SmsProcessingAdmission
 import com.pocketfinancer.data.repository.SmsProcessingStore
+import com.pocketfinancer.data.repository.SmsProcessingStoreException
 import com.pocketfinancer.inference.SlmCacheDiagnostics
 import com.pocketfinancer.inference.SlmExtractionResult
 import com.pocketfinancer.inference.SlmLease
@@ -16,6 +19,7 @@ import com.pocketfinancer.pipeline.sms.DefaultSmsV5ProcessingCoordinator
 import com.pocketfinancer.pipeline.sms.SmsOperationSnapshotFactory
 import com.pocketfinancer.pipeline.sms.SmsV4ModelIdentity
 import com.pocketfinancer.pipeline.sms.SmsV4OperationSnapshotFactory
+import com.pocketfinancer.pipeline.sms.SmsV5OperationSnapshot
 import com.pocketfinancer.pipeline.sms.SmsV5OperationSnapshotFactory
 import com.pocketfinancer.pipeline.sms.SmsProcessingOutcome
 import com.pocketfinancer.pipeline.sms.SmsProcessingObserver
@@ -195,7 +199,15 @@ class PipelineService @Inject constructor(
         )
     }
 
-    suspend fun retryReview(reviewCaseId: String, configurationMode: String): ProcessingResult {
+    suspend fun retryReview(reviewCaseId: String, configurationMode: String): ProcessingResult = try {
+        retryReviewInternal(reviewCaseId, configurationMode)
+    } catch (_: SmsAdmissionBusyException) {
+        ProcessingResult.Failure("This SMS is already being processed.", retryable = true)
+    } catch (_: SmsProcessingStoreException) {
+        ProcessingResult.Failure("The saved review changed; reopen it before retrying.", retryable = false)
+    }
+
+    private suspend fun retryReviewInternal(reviewCaseId: String, configurationMode: String): ProcessingResult {
         require(configurationMode in setOf("original", "current"))
         val retry = smsProcessingStore.retryContext(reviewCaseId)
         val previousConfiguration = JSONObject(retry.operation.configurationJson)
@@ -326,15 +338,21 @@ class PipelineService @Inject constructor(
         configurationRepository: ProcessingConfigurationRepository,
         observer: ProcessingObserver?
     ): ProcessingResult {
+        require(trigger != "retry") { "Extraction retry requires an existing Review parent" }
         val sourceIdentity = sms.sourceIdentity
-        val sourceId = sourceIdentity.opaqueCandidateKey
+        // A broadcast's content/time fingerprint is not connector identity.
+        // Only a provider _id authorizes cross-invocation outcome reuse here.
+        val reliableIdentity = sourceIdentity.providerMessageId != null
+        val sourceId = if (reliableIdentity) sourceIdentity.opaqueCandidateKey else
+            "sms_import_${UUID.randomUUID()}"
         val receiptId = UUID.nameUUIDFromBytes(sourceId.toByteArray(Charsets.UTF_8)).toString()
         val now = System.currentTimeMillis()
-        store.admitSource(
+        var createdSnapshot: SmsV5OperationSnapshot? = null
+        val admission = store.admitForProcessing(
             AdmittedSmsSourceEntity(
                 id = sourceId,
                 sourceConnector = sourceIdentity.connector,
-                sourceMessageId = sourceIdentity.messageId,
+                sourceMessageId = if (reliableIdentity) sourceIdentity.messageId else "import:$sourceId",
                 sourceProviderMessageId = sourceIdentity.providerMessageId,
                 sourceFingerprint = sourceIdentity.fallbackFingerprint,
                 sourceAlternateFingerprint = sourceIdentity.alternateFingerprint,
@@ -347,29 +365,39 @@ class PipelineService @Inject constructor(
                 admittedAt = now,
                 retentionState = "admitted"
             )
-        )
-        val currency = configurationRepository.confirmedPrimaryCurrency()
-            ?: return ProcessingResult.AwaitingConfiguration
+        ) { storedSource ->
+            val currency = configurationRepository.confirmedPrimaryCurrency()
+                ?: return@admitForProcessing null
+            createdSnapshot = v5SnapshotFactory.create(
+                source = AdmittedMessageRef(
+                    storedSource.id, storedSource.admissionReceiptId,
+                    SmsProcessingStore.sha256(storedSource.rawMessage)
+                ),
+                trigger = trigger,
+                primaryCurrency = currency,
+                enabledProfiles = configurationRepository.enabledProfiles(currency),
+                receivedTimestampEpochMs = storedSource.sourceTimestamp ?: storedSource.admittedAt,
+                receivedTimestampProvenance = if (storedSource.sourceTimestamp == null) {
+                    "platform_received"
+                } else "acquisition_supplied_message_time",
+                admissionTimestampEpochMs = storedSource.admittedAt,
+                modelIdentity = lease?.let(v5Coordinator::modelIdentityForLease)
+                    ?: v5Coordinator.currentModelIdentity(),
+                runtimeVersion = "llama.cpp-jni",
+                deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
+                    ?: "android-device",
+                now = now,
+                grammarEnabled = slmProcessingPreferences.gbnfGrammarEnabled.value
+            )
+            createdSnapshot?.operationId
+        }
+        if (admission !is SmsProcessingAdmission.Claimed) {
+            return existingAdmissionResult(admission).also(::publishResult)
+        }
+        val snapshot = checkNotNull(createdSnapshot)
         val reference = AdmittedMessageRef(
-            sourceId, receiptId, SmsProcessingStore.sha256(sms.body)
-        )
-        val snapshot = v5SnapshotFactory.create(
-            source = reference,
-            trigger = trigger,
-            primaryCurrency = currency,
-            enabledProfiles = configurationRepository.enabledProfiles(currency),
-            receivedTimestampEpochMs = sms.sourceTimestamp ?: now,
-            receivedTimestampProvenance = if (sms.sourceTimestamp == null) {
-                "platform_received"
-            } else "acquisition_supplied_message_time",
-            admissionTimestampEpochMs = now,
-            modelIdentity = lease?.let(v5Coordinator::modelIdentityForLease)
-                ?: v5Coordinator.currentModelIdentity(),
-            runtimeVersion = "llama.cpp-jni",
-            deviceCohort = android.os.Build.MODEL?.takeIf { it.isNotBlank() }
-                ?: "android-device",
-            now = now,
-            grammarEnabled = slmProcessingPreferences.gbnfGrammarEnabled.value
+            admission.source.id, admission.source.admissionReceiptId,
+            SmsProcessingStore.sha256(admission.source.rawMessage)
         )
         val automaticObserver = SmsProcessingObserver { event ->
             when (val transient = event.transient) {
@@ -438,23 +466,59 @@ class PipelineService @Inject constructor(
                 }
             }
         }
-        val outcome = if (lease != null) {
-            v5Coordinator.processUsingLease(reference, snapshot, lease, automaticObserver)
-        } else v5Coordinator.process(reference, snapshot, automaticObserver)
-        return mapOutcome(outcome).also { result ->
-            when (result) {
-                is ProcessingResult.Saved -> emit(Stage.SAVED, "Transaction saved")
-                is ProcessingResult.Skipped -> emit(
-                    Stage.SKIPPED,
-                    if (result.reason == SkipReason.RETAINED_FOR_REVIEW) {
-                        "Saved for review"
-                    } else "No transaction created"
-                )
-                is ProcessingResult.Failure -> emit(Stage.ERROR, result.message)
-                ProcessingResult.AwaitingConfiguration ->
-                    emit(Stage.ERROR, "Primary currency is not configured")
-                ProcessingResult.Stopped -> emit(Stage.SKIPPED, "Processing stopped")
+        val outcome = v5Coordinator.processAdmitted(
+            reference, snapshot, admission.claim, lease, automaticObserver
+        )
+        return mapOutcome(outcome).also(::publishResult)
+    }
+
+    private fun existingAdmissionResult(admission: SmsProcessingAdmission): ProcessingResult = when (admission) {
+        SmsProcessingAdmission.AwaitingConfiguration -> ProcessingResult.AwaitingConfiguration
+        SmsProcessingAdmission.Conflict -> ProcessingResult.Failure(
+            "The source identity matches different SMS evidence; the saved evidence was not changed.",
+            retryable = false
+        )
+        is SmsProcessingAdmission.Saved -> ProcessingResult.Saved(admission.transactionIds, alreadyCommitted = true)
+        is SmsProcessingAdmission.Busy -> ProcessingResult.Failure(
+            "This SMS is already being processed.", retryable = true
+        )
+        is SmsProcessingAdmission.Existing -> when (admission.operation.state) {
+            "persisted" -> runCatching {
+                val values = JSONObject(checkNotNull(admission.operation.settlementReceiptJson))
+                    .getJSONArray("transaction_ids")
+                val ids = (0 until values.length()).map(values::getString)
+                check(ids.isNotEmpty())
+                ProcessingResult.Saved(ids, alreadyCommitted = true)
+            }.getOrElse {
+                ProcessingResult.Failure("The saved transaction receipt needs recovery.", retryable = true)
             }
+            "discarded" -> ProcessingResult.Skipped(SkipReason.NOT_TRANSACTION)
+            else -> if (admission.reviewState == "rejected") {
+                ProcessingResult.Skipped(SkipReason.NOT_TRANSACTION)
+            } else if (admission.reviewCaseId != null) {
+                ProcessingResult.Skipped(SkipReason.RETAINED_FOR_REVIEW)
+            } else {
+                ProcessingResult.Failure(
+                    "Saved processing needs recovery; retry extraction explicitly from Review.",
+                    retryable = true
+                )
+            }
+        }
+        is SmsProcessingAdmission.Claimed -> error("A new claim must execute its stored snapshot")
+    }
+
+    private fun publishResult(result: ProcessingResult) {
+        when (result) {
+            is ProcessingResult.Saved -> emit(
+                Stage.SAVED, if (result.alreadyCommitted) "Transaction already saved" else "Transaction saved"
+            )
+            is ProcessingResult.Skipped -> emit(
+                Stage.SKIPPED,
+                if (result.reason == SkipReason.RETAINED_FOR_REVIEW) "Saved for review" else "No transaction created"
+            )
+            is ProcessingResult.Failure -> emit(Stage.ERROR, result.message)
+            ProcessingResult.AwaitingConfiguration -> emit(Stage.ERROR, "Primary currency is not configured")
+            ProcessingResult.Stopped -> emit(Stage.SKIPPED, "Processing stopped")
         }
     }
 

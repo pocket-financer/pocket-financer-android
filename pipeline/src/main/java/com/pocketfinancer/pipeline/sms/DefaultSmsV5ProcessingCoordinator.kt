@@ -60,6 +60,15 @@ class DefaultSmsV5ProcessingCoordinator @Inject constructor(
         observer: SmsProcessingObserver = SmsProcessingObserver.None
     ): SmsProcessingOutcome = processInternal(source, operation, observer, lease)
 
+    /** Runs the first claim already acquired atomically with source admission. */
+    suspend fun processAdmitted(
+        source: AdmittedMessageRef,
+        operation: SmsV5OperationSnapshot,
+        claim: SmsOperationClaim,
+        lease: SlmLease?,
+        observer: SmsProcessingObserver = SmsProcessingObserver.None
+    ): SmsProcessingOutcome = processInternal(source, operation, observer, lease, claim)
+
     fun currentModelIdentity(): SmsV4ModelIdentity = identityFor(resolveCurrentModel())
 
     fun modelIdentityForLease(lease: SlmLease): SmsV4ModelIdentity = identityFor(lease.model)
@@ -68,16 +77,26 @@ class DefaultSmsV5ProcessingCoordinator @Inject constructor(
         source: AdmittedMessageRef,
         operation: SmsV5OperationSnapshot,
         observer: SmsProcessingObserver,
-        preferredLease: SlmLease?
+        preferredLease: SlmLease?,
+        admittedClaim: SmsOperationClaim? = null
     ): SmsProcessingOutcome {
+        val initialClaim = admittedClaim ?: operation.admissionClaim
+        require(initialClaim == null || initialClaim.operationId == operation.operationId)
         if (!operationIsValid(source, operation)) {
+            if (initialClaim != null) {
+                val reasons = listOf("operation_release_incompatible")
+                val reviewId = store.retainForReview(initialClaim, reasons, System.currentTimeMillis())
+                return SmsProcessingOutcome.RetainedForReview(operation.operationId, reviewId, reasons)
+            }
             return retainWithoutClaim(operation, listOf("operation_release_incompatible"))
         }
         settledOutcome(operation)?.let { return it }
-        val claim = try {
+        val claim = initialClaim ?: try {
             store.claim(operation.operationId, System.currentTimeMillis())
         } catch (_: Exception) {
-            return retainWithoutClaim(operation, listOf("persistence_claim_ownership_invalid"))
+            return settledOutcome(operation) ?: SmsProcessingOutcome.RetryableFailure(
+                operation.operationId, null, "persistence_claim_ownership_invalid", "existing_operation"
+            )
         }
         return supervisorScope {
             val heartbeat = launchHeartbeat(claim)

@@ -87,35 +87,40 @@ class SmsOperationSnapshotFactory @Inject constructor(
         val configurationHash = SmsProcessingStore.sha256(CanonicalAndroidJson.stringify(payload))
         payload.put("config_hash", configurationHash)
         val configurationJson = CanonicalAndroidJson.stringify(payload)
-        store.createOperation(
-            SmsProcessingOperationEntity(
-                id = operationId,
-                sourceId = source.sourceId,
-                parentOperationId = parentOperationId,
-                stableEventId = resolvedStableEventId,
-                trigger = trigger,
-                configurationJson = configurationJson,
-                configurationHash = configurationHash,
-                contractReleaseId = configuration.releaseId,
-                state = "ready",
-                transitionSequence = 0,
-                ownerToken = null,
-                ownerGeneration = 0,
-                claimExpiresAt = null,
-                createdAt = now,
-                updatedAt = now,
-                settledAt = null,
-                settlementReceiptJson = null,
-                deletionEpoch = 0
-            )
+        val storedOperation = SmsProcessingOperationEntity(
+            id = operationId,
+            sourceId = source.sourceId,
+            parentOperationId = parentOperationId,
+            stableEventId = resolvedStableEventId,
+            trigger = trigger,
+            configurationJson = configurationJson,
+            configurationHash = configurationHash,
+            contractReleaseId = configuration.releaseId,
+            state = "ready",
+            transitionSequence = 0,
+            ownerToken = null,
+            ownerGeneration = 0,
+            claimExpiresAt = null,
+            createdAt = now,
+            updatedAt = now,
+            settledAt = null,
+            settlementReceiptJson = null,
+            deletionEpoch = 0
         )
+        val admissionClaim = if (trigger == "retry") {
+            store.createRetryOperationAndClaim(storedOperation)
+        } else {
+            store.createOperation(storedOperation)
+            null
+        }
         return SmsOperationSnapshot(
             operationId,
             parentOperationId,
             resolvedStableEventId,
             configuration,
             configurationJson,
-            configurationHash
+            configurationHash,
+            admissionClaim
         )
     }
 

@@ -23,7 +23,6 @@ import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.pipeline.PipelineService
-import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.SmsNotificationHelper
 import com.pocketfinancer.setup.AdaptiveHistoryScanPolicy
 import com.pocketfinancer.setup.HistoryScanDecision
@@ -95,9 +94,6 @@ class OnboardingService : Service() {
 
     @Inject
     lateinit var smsRepository: SmsRepository
-
-    @Inject
-    lateinit var smsFilterPipeline: SmsFilterPipeline
 
     @Inject
     lateinit var pipelineService: PipelineService
@@ -1397,12 +1393,10 @@ class OnboardingService : Service() {
                     ensureSmsPermissionForTerminalPublication()
                     return
                 }
-                val deterministicallyEligible = rawMessages.filter { message ->
-                    smsFilterPipeline.isTransactional(
-                        message.address,
-                        message.body
-                    )
-                }
+                // Admission owns processing eligibility. The old negative
+                // sender/amount/account/OTP tests must not drop evidence first.
+                // Terminal conservative exclusions await the retention contract.
+                val deterministicallyEligible = rawMessages
                 currentCoroutineContext().ensureActive()
                 transactionalMessages = withContext(Dispatchers.IO) {
                     val unsaved = mutableListOf<

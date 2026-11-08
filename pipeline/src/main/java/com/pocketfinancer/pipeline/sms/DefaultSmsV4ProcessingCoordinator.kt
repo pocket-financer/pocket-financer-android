@@ -65,11 +65,19 @@ class DefaultSmsV4ProcessingCoordinator @Inject constructor(
         observer: SmsProcessingObserver,
         preferredLease: SlmLease?
     ): SmsProcessingOutcome {
+        val initialClaim = operation.admissionClaim
+        require(initialClaim == null || initialClaim.operationId == operation.operationId)
         if (!operationIsValid(source, operation)) {
+            if (initialClaim != null) {
+                return retainOwned(
+                    initialClaim, operation,
+                    listOf("persistence_configuration_hash_mismatch"), observer
+                )
+            }
             return retainWithoutClaim(operation, listOf("persistence_configuration_hash_mismatch"))
         }
         settledOutcome(operation)?.let { return it }
-        val claim = try {
+        val claim = initialClaim ?: try {
             store.claim(operation.operationId, System.currentTimeMillis())
         } catch (_: Exception) {
             return retainWithoutClaim(operation, listOf("persistence_claim_ownership_invalid"))
