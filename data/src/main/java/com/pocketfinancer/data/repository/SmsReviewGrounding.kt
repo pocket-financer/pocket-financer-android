@@ -72,11 +72,14 @@ object SmsReviewGrounding {
         check(retained.contractVersion == "pocketfinancer.review-case/2")
         val configuration = JSONObject(operationConfigurationJson)
         val releaseId = configuration.getJSONObject("contract_release").getString("release_id")
+        val contract = configuration.getString("contract")
         check(
             (releaseId == "native-integration-v5" &&
-                configuration.getString("contract") == "pocketfinancer.processing-config/5") ||
+                contract == "pocketfinancer.processing-config/5") ||
                 (releaseId == "native-integration-v6" &&
-                    configuration.getString("contract") == "pocketfinancer.processing-config/6")
+                    contract == "pocketfinancer.processing-config/6") ||
+                (releaseId == "pocketfinancer.sms-pipeline/1" &&
+                    contract == "pocketfinancer.sms-pipeline/1")
         )
         check(configuration.getJSONObject("persistence_policy").getString("rollout_mode") == "automatic")
         val receipt = configuration.getJSONObject("received_timestamp")
@@ -379,8 +382,15 @@ object SmsReviewGrounding {
 
     fun directionFrom(text: String): String? {
         val normalized = normalizeText(text)
-        val debit = listOf("debit", "debited", "deducted", "withdrawn", "spent", "paid", "charged")
-        val credit = listOf("credit", "credited", "deposited", "received", "refunded")
+        val debit = listOf(
+            "debit", "debited", "deducted", "withdrawn", "spent", "paid", "charged",
+            "sent", "txn", "transaction", "payment", "transfer", "transferred",
+            "purchase", "purchased", "autopaid", "without otp", "dr", "used"
+        )
+        val credit = listOf(
+            "credit", "credited", "deposited", "deposit", "received",
+            "refunded", "refund", "reversed", "reversal", "cr", "cashback", "adjusted"
+        )
         return when {
             debit.any { Regex("\\b${Regex.escape(it)}\\b").containsMatchIn(normalized) } -> "debit"
             credit.any { Regex("\\b${Regex.escape(it)}\\b").containsMatchIn(normalized) } -> "credit"

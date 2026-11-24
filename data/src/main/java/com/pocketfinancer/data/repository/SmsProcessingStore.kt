@@ -62,7 +62,8 @@ data class SmsReviewRetryContext(
 data class SmsDuplicateMatchCounts(
     val persistedSourceEvents: Int,
     val matchingSourceEvents: Int,
-    val matchingTransactionFingerprints: Int
+    val matchingTransactionFingerprints: Int,
+    val windowDuplicateMatches: Int = 0
 )
 
 data class SmsReviewV2Evidence(
@@ -217,9 +218,9 @@ class SmsProcessingStore @Inject constructor(
         stored.sourceProviderMessageId == incoming.sourceProviderMessageId &&
         stored.sourceTimestamp == incoming.sourceTimestamp &&
         stored.messageType == incoming.messageType &&
-        // Existing terminal-none retention erased these fields. Its retained
+        // Existing terminal-none / prefilter-excluded retention erased these fields. Its retained
         // fingerprint is an integrity check, never the lookup identity.
-        (stored.retentionState == "terminally_discarded" ||
+        (stored.retentionState in TOMBSTONE_RETENTION_STATES ||
             (stored.rawMessage == incoming.rawMessage && stored.sender == incoming.sender))
 
     private fun sameLedgerSourceEvidence(
@@ -515,7 +516,13 @@ class SmsProcessingStore @Inject constructor(
         operationId: String,
         sourceId: String,
         stableEventId: String,
-        transactionFingerprint: String
+        transactionFingerprint: String,
+        accountId: String? = null,
+        direction: String? = null,
+        minorUnits: Long? = null,
+        currency: String? = null,
+        occurredAtEpochMs: Long? = null,
+        duplicateWindowMs: Long = DUPLICATE_WINDOW_MS
     ): SmsDuplicateMatchCounts = SmsDuplicateMatchCounts(
         persistedSourceEvents = dao.countPersistedSourceEvents(
             operationId, sourceId, stableEventId
@@ -525,7 +532,27 @@ class SmsProcessingStore @Inject constructor(
         ),
         matchingTransactionFingerprints = dao.countMatchingTransactionFingerprints(
             operationId, transactionFingerprint
-        )
+        ),
+        windowDuplicateMatches = if (
+            accountId != null &&
+            direction != null &&
+            minorUnits != null &&
+            currency != null &&
+            occurredAtEpochMs != null
+        ) {
+            database.transactionDao().countMatchingTransactionsInWindow(
+                accountId = accountId,
+                direction = direction,
+                minorUnits = minorUnits,
+                currency = currency.uppercase(),
+                occurredAtEpochMs = occurredAtEpochMs,
+                windowMs = duplicateWindowMs,
+                excludeSourceId = sourceId,
+                excludeOperationId = operationId
+            )
+        } else {
+            0
+        }
     )
 
     suspend fun recordGateDecision(
@@ -721,7 +748,7 @@ class SmsProcessingStore @Inject constructor(
             ).also { check(dao.updateReviewCase(it) == 1) }
             else -> existing
         }
-        if (operation.contractReleaseId in setOf("native-integration-v5", "native-integration-v6") &&
+        if (operation.contractReleaseId in CONSOLIDATED_RELEASE_IDS &&
             reviewCase.currentOperationId == operation.id) {
             val evidence = v2Evidence ?: SmsReviewV2Evidence(
                 furthestStage = stageForState(operation.state),
@@ -758,13 +785,39 @@ class SmsProcessingStore @Inject constructor(
     suspend fun settleDiscarded(
         claim: SmsOperationClaim,
         reason: String,
-        now: Long
+        now: Long,
+        retentionState: String = RETENTION_TERMINALLY_DISCARDED
     ) = database.withTransaction {
+        require(retentionState in TOMBSTONE_RETENTION_STATES)
         val operation = requireOwned(claim, now)
-        check(dao.eraseTerminalSource(operation.sourceId, operation.deletionEpoch) == 1) {
+        val source = dao.getSource(operation.sourceId)
+            ?: throw SmsProcessingStoreException("Admitted SMS source not found")
+        val existingBodySha256 = source.sourceAlternateFingerprint
+            ?.takeIf { source.rawMessage.isEmpty() && it.startsWith("{") }
+            ?.let { raw -> runCatching { JSONObject(raw).optString("body_sha256") }.getOrNull() }
+            ?.takeIf { it.matches(SHA256_REGEX) }
+        val bodyDigest = existingBodySha256 ?: sha256(source.rawMessage)
+        val tombstoneMetadata = tombstoneMetadataJson(
+            bodySha256 = bodyDigest,
+            reason = reason,
+            tombstonedAtEpochMs = now
+        )
+        check(
+            dao.tombstoneSource(
+                sourceId = operation.sourceId,
+                expectedDeletionEpoch = operation.deletionEpoch,
+                retentionState = retentionState,
+                tombstoneMetadata = tombstoneMetadata
+            ) == 1
+        ) {
             "SMS source deletion epoch changed before terminal discard"
         }
-        val receipt = "{\"reason\":${JSONObject.quote(reason)}}"
+        val receipt = JSONObject()
+            .put("reason", reason)
+            .put("retention_state", retentionState)
+            .put("body_sha256", bodyDigest)
+            .put("tombstoned_at_epoch_ms", now)
+            .toString()
         check(
             dao.settleDiscarded(
                 operation.id,
@@ -853,7 +906,7 @@ class SmsProcessingStore @Inject constructor(
 
     private suspend fun reusableV5Review(
         operation: SmsProcessingOperationEntity
-    ): SmsReviewCaseEntity? = if (operation.contractReleaseId in setOf("native-integration-v5", "native-integration-v6")) {
+    ): SmsReviewCaseEntity? = if (operation.contractReleaseId in CONSOLIDATED_RELEASE_IDS) {
         dao.getUneditedOpenV5ReviewCaseForSource(operation.sourceId)
     } else {
         null
@@ -882,7 +935,7 @@ class SmsProcessingStore @Inject constructor(
         operation: SmsProcessingOperationEntity,
         now: Long
     ) {
-        if (operation.contractReleaseId !in setOf("native-integration-v5", "native-integration-v6")) return
+        if (operation.contractReleaseId !in CONSOLIDATED_RELEASE_IDS) return
         dao.upsertReviewCaseV2Extension(
             SmsReviewCaseV2ExtensionEntity(
                 reviewCaseId = reviewCaseId,
@@ -923,23 +976,54 @@ class SmsProcessingStore @Inject constructor(
     companion object {
         const val CLAIM_LEASE_MS = 120_000L
         const val CLAIM_HEARTBEAT_MS = 15_000L
+        const val DUPLICATE_WINDOW_MS = 300_000L
+        const val RETENTION_TERMINALLY_DISCARDED = "terminally_discarded"
+        const val RETENTION_TOMBSTONED_EXCLUDED = "tombstoned_excluded"
+        const val RETENTION_TOMBSTONED_NONE = "tombstoned_none"
+        val TOMBSTONE_RETENTION_STATES = setOf(
+            RETENTION_TERMINALLY_DISCARDED,
+            RETENTION_TOMBSTONED_EXCLUDED,
+            RETENTION_TOMBSTONED_NONE
+        )
+        private val CONSOLIDATED_RELEASE_IDS = setOf(
+            "native-integration-v5",
+            "native-integration-v6",
+            "pocketfinancer.sms-pipeline/1"
+        )
         private val SHA256_REGEX = Regex("[0-9a-f]{64}")
         private val TRACE_STAGES = setOf(
             "admission",
+            "prefilter",
             "configuration",
             "claim",
             "analysis",
+            "analysis_advisory",
             "triage",
+            "extractor_input",
+            "extractor_execution",
+            "extractor_validation",
             "selector_execution",
             "selector_validation",
+            "normalization",
             "reconstruction",
             "account_resolution",
+            "duplicate_assessment",
             "persistence_gate",
             "settlement",
             "review",
             "recovery",
             "erase"
         )
+
+        private fun tombstoneMetadataJson(
+            bodySha256: String,
+            reason: String,
+            tombstonedAtEpochMs: Long
+        ): String = JSONObject()
+            .put("body_sha256", bodySha256)
+            .put("reason", reason)
+            .put("tombstoned_at_epoch_ms", tombstonedAtEpochMs)
+            .toString()
         private val TRACE_STATUSES = setOf(
             "pending",
             "running",

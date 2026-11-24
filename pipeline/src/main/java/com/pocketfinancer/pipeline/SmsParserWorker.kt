@@ -353,7 +353,8 @@ class SmsParserWorker(
                 .processSingle(
                     sms = sms,
                     observer = automaticActivity,
-                    trigger = "realtime"
+                    trigger = "realtime",
+                    admittedSourceId = candidate.candidateKey
                 )
         ) {
                 is PipelineService.ProcessingResult.Saved -> {

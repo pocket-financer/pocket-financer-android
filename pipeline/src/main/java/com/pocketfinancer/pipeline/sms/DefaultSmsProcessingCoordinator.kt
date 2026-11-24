@@ -3,18 +3,25 @@ package com.pocketfinancer.pipeline.sms
 import android.content.Context
 import com.pocketfinancer.data.repository.GroundedAccountResolution
 import com.pocketfinancer.data.repository.GroundedAccountResolver
+import com.pocketfinancer.data.repository.SmsAutomaticPersistenceConflict
+import com.pocketfinancer.data.repository.SmsAutomaticTransactionInput
+import com.pocketfinancer.data.repository.SmsOperationClaim
 import com.pocketfinancer.data.repository.SmsProcessingStore
+import com.pocketfinancer.data.repository.SmsReviewV2Evidence
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.resolveActiveSlmTier
 import com.pocketfinancer.inference.CandidateSelectorRuntimeProfile
-import com.pocketfinancer.inference.DefaultDirectCandidateSelector
-import com.pocketfinancer.inference.DirectCandidateSelectorRequest
+import com.pocketfinancer.inference.DirectCandidateSelectorResult
+import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelSpec
 import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
+import com.pocketfinancer.inference.SlmTokenCallback
 import com.pocketfinancer.inference.withLease
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
+import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
@@ -24,9 +31,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 
+/** Consolidated grounded processing coordinator for `pocketfinancer.sms-pipeline/1`. */
 @Singleton
 class DefaultSmsProcessingCoordinator @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -34,15 +41,11 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
     private val runtime: SlmRuntime,
     private val modelStorage: SlmModelStorage,
     private val deviceCapabilities: DeviceCapabilities,
-    private val selector: DefaultDirectCandidateSelector,
+    private val extractor: DefaultDirectSmsExtractor,
     private val accountResolver: GroundedAccountResolver,
     private val snapshotFactory: SmsOperationSnapshotFactory
 ) : SmsProcessingCoordinator {
     private val analyzer = StructuralSmsAnalyzer()
-    private val triageEvaluator = SmsTriageEvaluator()
-    private val validator = GroundedSelectorValidator()
-    private val reconstructor = SemanticReconstructor()
-    private val gate = AutomaticPersistenceGate()
 
     override suspend fun process(
         source: AdmittedMessageRef,
@@ -50,58 +53,65 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
         observer: SmsProcessingObserver
     ): SmsProcessingOutcome = processInternal(source, operation, observer, null)
 
-    /**
-     * Uses a lease already owned by a foreground or worker batch. This keeps
-     * the coordinator as the only SMS decision path without trying to acquire
-     * a second runtime lease while the caller deliberately keeps one resident.
-     */
+    override suspend fun requestStop(operationId: String): SmsProcessingStopReceipt {
+        val receipt = store.requestStop(operationId, System.currentTimeMillis())
+        return SmsProcessingStopReceipt(
+            operationId = receipt.operationId,
+            reviewCaseId = receipt.reviewCaseId,
+            state = receipt.state,
+            committed = receipt.committed
+        )
+    }
+
     suspend fun processUsingLease(
         source: AdmittedMessageRef,
         operation: SmsOperationSnapshot,
-        lease: com.pocketfinancer.inference.SlmLease,
+        lease: SlmLease,
         observer: SmsProcessingObserver = SmsProcessingObserver.None
     ): SmsProcessingOutcome = processInternal(source, operation, observer, lease)
+
+    /** Runs the first claim already acquired atomically with source admission. */
+    suspend fun processAdmitted(
+        source: AdmittedMessageRef,
+        operation: SmsOperationSnapshot,
+        claim: SmsOperationClaim,
+        lease: SlmLease?,
+        observer: SmsProcessingObserver = SmsProcessingObserver.None
+    ): SmsProcessingOutcome = processInternal(source, operation, observer, lease, claim)
+
+    fun currentModelIdentity(): SmsModelIdentity = identityFor(resolveCurrentModel())
+
+    fun modelIdentityForLease(lease: SlmLease): SmsModelIdentity = identityFor(lease.model)
 
     private suspend fun processInternal(
         source: AdmittedMessageRef,
         operation: SmsOperationSnapshot,
         observer: SmsProcessingObserver,
-        preferredLease: com.pocketfinancer.inference.SlmLease?
+        preferredLease: SlmLease?,
+        admittedClaim: SmsOperationClaim? = null
     ): SmsProcessingOutcome {
-        val initialClaim = operation.admissionClaim
+        val initialClaim = admittedClaim ?: operation.admissionClaim
         require(initialClaim == null || initialClaim.operationId == operation.operationId)
-        if (
-            source.sourceId != operation.configuration.sourceId ||
-            SmsProcessingStore.sha256(source.sourceId) !=
-                operation.configuration.sourceRefHash ||
-            operation.operationId != operation.configuration.operationId ||
-            operation.parentOperationId != operation.configuration.parentOperationId ||
-            operation.configuration.generationMode != "DIRECT_NON_THINKING" ||
-            operation.configuration.decoding != "greedy" ||
-            operation.configuration.answerTokenLimit != 512 ||
-            operation.configuration.rawOutputByteLimit != 16_384 ||
-            operation.configuration.parserDeadlineMs != 0L ||
-            operation.configuration.rolloutMode !in setOf("shadow", "review_only") ||
-            !snapshotFactory.configurationMatches(operation)
-        ) {
-            // configurationHash covers the payload before its self-describing hash field;
-            // equality here would indicate the wrong hashing boundary was used.
+        if (!operationIsValid(source, operation)) {
             if (initialClaim != null) {
-                return retainOwned(
-                    initialClaim, operation,
-                    listOf("persistence_configuration_hash_mismatch"), observer
+                val reasons = listOf("operation_release_incompatible")
+                val reviewId = store.retainForReview(
+                    initialClaim,
+                    reasons,
+                    System.currentTimeMillis(),
+                    SmsReviewV2Evidence("configuration", "[]", "[]")
                 )
+                return SmsProcessingOutcome.RetainedForReview(operation.operationId, reviewId, reasons)
             }
-            return retainWithoutClaim(
-                operation,
-                listOf("persistence_configuration_hash_mismatch")
-            )
+            return retainWithoutClaim(operation, listOf("operation_release_incompatible"))
         }
         settledOutcome(operation)?.let { return it }
         val claim = initialClaim ?: try {
             store.claim(operation.operationId, System.currentTimeMillis())
         } catch (_: Exception) {
-            return retainWithoutClaim(operation, listOf("persistence_claim_ownership_invalid"))
+            return settledOutcome(operation) ?: SmsProcessingOutcome.RetryableFailure(
+                operation.operationId, null, "persistence_claim_ownership_invalid", "existing_operation"
+            )
         }
         return supervisorScope {
             val heartbeat = launchHeartbeat(claim)
@@ -109,44 +119,70 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
                 processOwned(source, operation, claim, observer, preferredLease)
             } catch (_: CancellationException) {
                 withContext(NonCancellable) {
-                    val stopped = store.requestStop(
-                        operation.operationId,
-                        System.currentTimeMillis()
-                    )
+                    val stopped = store.requestStop(operation.operationId, System.currentTimeMillis())
                     SmsProcessingOutcome.Stopped(
                         operation.operationId,
-                        reviewCaseId = stopped.reviewCaseId,
-                        reason = if (stopped.committed) {
-                            "already_committed"
-                        } else {
-                            "processing_cancelled"
-                        }
+                        stopped.reviewCaseId,
+                        if (stopped.committed) "already_committed" else "processing_cancelled"
                     )
                 }
             } catch (_: Exception) {
-                store.reviewCaseIdForOperation(operation.operationId)?.let { reviewCaseId ->
-                    SmsProcessingOutcome.Stopped(
+                withContext(NonCancellable) {
+                    val reasons = listOf("runtime_failure")
+                    val reviewId = runCatching {
+                        store.retainForReview(
+                            claim,
+                            reasons,
+                            System.currentTimeMillis(),
+                            SmsReviewV2Evidence("configuration", "[]", "[]")
+                        )
+                    }.getOrNull() ?: store.requestStop(
                         operation.operationId,
-                        reviewCaseId,
-                        "operation_interrupted"
-                    )
-                } ?: retainWithoutClaim(
-                    operation,
-                    listOf("operation_interrupted")
-                )
+                        System.currentTimeMillis()
+                    ).reviewCaseId
+                    if (reviewId != null) {
+                        SmsProcessingOutcome.RetainedForReview(
+                            operation.operationId, reviewId, reasons
+                        )
+                    } else {
+                        SmsProcessingOutcome.RetryableFailure(
+                            operation.operationId,
+                            null,
+                            reasons.single(),
+                            "foreground_or_model_availability"
+                        )
+                    }
+                }
             } finally {
                 heartbeat.cancel()
             }
         }
     }
 
+    private fun operationIsValid(
+        source: AdmittedMessageRef,
+        operation: SmsOperationSnapshot
+    ): Boolean = source.sourceId == operation.configuration.sourceId &&
+        SmsProcessingStore.sha256(source.sourceId) == operation.configuration.sourceRefHash &&
+        operation.operationId == operation.configuration.operationId &&
+        operation.parentOperationId == operation.configuration.parentOperationId &&
+        operation.configuration.contract == SmsContractAssets.PROCESSING_CONFIG_CONTRACT &&
+        operation.configuration.releaseId == SmsContractAssets.RELEASE_ID &&
+        operation.configuration.releaseManifestHash == SmsContractAssets.MANIFEST_SHA256 &&
+        operation.configuration.modelIdentityKind == "file_sha256" &&
+        operation.configuration.rolloutMode == "automatic" &&
+        operation.configuration.wireTransport == "direct_json" &&
+        (operation.configuration.trigger != "retry" || operation.parentOperationId != null) &&
+        snapshotFactory.configurationMatches(operation)
+
     private suspend fun processOwned(
         source: AdmittedMessageRef,
         operation: SmsOperationSnapshot,
-        claim: com.pocketfinancer.data.repository.SmsOperationClaim,
+        initialClaim: SmsOperationClaim,
         observer: SmsProcessingObserver,
-        preferredLease: com.pocketfinancer.inference.SlmLease?
+        preferredLease: SlmLease?
     ): SmsProcessingOutcome {
+        var claim = initialClaim
         emit(claim, "claim", "completed", emptyList(), observer)
         val evidence = store.sourceEvidence(source.sourceId)
         if (
@@ -157,9 +193,17 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
                 claim,
                 operation,
                 listOf("persistence_configuration_hash_mismatch"),
-                observer
+                observer,
+                SmsReviewV2Evidence("configuration", "[]", "[]")
             )
         }
+
+        val prefilter = SmsPrefilter.evaluate(evidence.body)
+        if (prefilter.excluded) {
+            return settlePrefilterExcluded(claim, operation, prefilter, observer)
+        }
+        emit(claim, "prefilter", "completed", listOf(prefilter.traceReasonCode), observer)
+
         val analysis = analyzer.analyze(evidence.body, operation)
         store.recordAnalysis(
             claim,
@@ -167,255 +211,711 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
             analysis.contract,
             analysis.sourceHash,
             analysis.configurationHash,
-            analysisJson(analysis),
+            analysis.canonicalJson(),
             System.currentTimeMillis()
         )
         store.transition(claim, "claimed", "analyzed", System.currentTimeMillis())
         emit(claim, "analysis", "completed", analysis.reasonCodes, observer)
-        val triage = triageEvaluator.evaluate(analysis)
         store.transition(claim, "analyzed", "triaged", System.currentTimeMillis())
-        emit(claim, "triage", "completed", triage.reasonCodes, observer)
+        emit(claim, "triage", "completed", analysis.reasonCodes, observer)
 
-        if (triage.disposition == SmsStorageDisposition.DISCARD) {
-            val reason = triage.reasonCodes.firstOrNull { it.startsWith("discard_") }
-                ?: "discard_unambiguous_standalone_non_event"
-            emit(claim, "settlement", "completed", listOf(reason), observer)
-            store.settleDiscarded(claim, reason, System.currentTimeMillis())
-            return SmsProcessingOutcome.TerminallyDiscarded(operation.operationId, reason)
-        }
-        val shouldSelect = triage.selectorAction != SmsSelectorAction.SKIP
-        if (!shouldSelect || !operation.configuration.selectorEligible) {
-            val reasons = triage.reasonCodes + if (!operation.configuration.selectorEligible) {
-                listOf(operation.configuration.selectorIneligibilityReason ?: "selector_runtime_ineligible")
-            } else {
-                emptyList()
-            }
-            return retainOwned(claim, operation, reasons.distinct().sorted(), observer)
-        }
-
-        val modelSpec = preferredLease?.model ?: resolveModel(operation)
-            ?: return retainOwned(
-                claim, operation, listOf("runtime_unavailable"), observer
-            )
-        if (modelSpec.modelId != operation.configuration.selectorModelId) {
-            return retainOwned(
-                claim, operation, listOf("runtime_ineligible"), observer
-            )
-        }
-        val selectorPayload = selectorPayload(evidence.body, analysis)
-        val prompt = readAsset("sms_processing/selector-prompt-v1.txt")
-        val grammar = readAsset("sms_processing/selector-output-v1.gbnf")
-        val profile = CandidateSelectorRuntimeProfile()
-        store.transition(claim, "triaged", "selector_running", System.currentTimeMillis())
-        emit(claim, "selector_execution", "running", emptyList(), observer)
-        val startedAt = System.currentTimeMillis()
-        val result = try {
-            if (preferredLease != null) {
-                selector.select(
-                    preferredLease,
-                    DirectCandidateSelectorRequest(prompt, selectorPayload, grammar, profile)
-                )
-            } else {
-                runtime.withLease(SlmRuntimeOwner.SMS_WORKER, modelSpec) { lease ->
-                    selector.select(
-                        lease,
-                        DirectCandidateSelectorRequest(prompt, selectorPayload, grammar, profile)
-                    )
-                }
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            store.recordSelectorAttempt(
-                claim,
-                runtimeProfileJson(profile),
-                selectorPayload,
-                null,
-                "failed",
-                null,
-                "runtime_unavailable",
-                startedAt,
-                System.currentTimeMillis()
-            )
-            emit(
-                claim,
-                "selector_execution",
-                "failed",
-                listOf("runtime_unavailable"),
-                observer
-            )
-            return retainOwned(
-                claim, operation, listOf("runtime_unavailable"), observer
-            )
-        }
-        val raw = result.rawOutput
-        if (raw == null) {
-            store.recordSelectorAttempt(
-                claim,
-                runtimeProfileJson(profile),
-                selectorPayload,
-                null,
-                result.completion,
-                null,
-                result.safeErrorCode,
-                startedAt,
-                System.currentTimeMillis()
-            )
-            emit(
-                claim,
-                "selector_execution",
-                if (result.completion == "interrupted") "interrupted" else "failed",
-                listOf(result.safeErrorCode ?: "selector_output_unavailable"),
-                observer
-            )
+        if (!operation.configuration.extractorEligible) {
             return retainOwned(
                 claim,
                 operation,
-                listOf(result.safeErrorCode ?: "selector_output_unavailable"),
+                listOf(operation.configuration.extractorIneligibilityReason ?: "runtime_unavailable"),
+                observer,
+                reviewEvidence(analysis, "extractor_input")
+            )
+        }
+        val model = preferredLease?.model ?: resolveCurrentModel() ?: return retainOwned(
+            claim,
+            operation,
+            listOf("runtime_unavailable"),
+            observer,
+            reviewEvidence(analysis, "extractor_input")
+        )
+        val currentIdentity = identityFor(model)
+        if (
+            !currentIdentity.eligible ||
+            currentIdentity.modelIdentifier != operation.configuration.modelIdentifier ||
+            currentIdentity.modelFileSha256 != operation.configuration.modelFileSha256
+        ) {
+            return retainOwned(
+                claim,
+                operation,
+                listOf("runtime_ineligible"),
+                observer,
+                reviewEvidence(analysis, "extractor_input")
+            )
+        }
+
+        val tokenRelay = LiveTokenRelay(operation.operationId, observer)
+        val grammarEnabled = operation.configuration.grammarEnabled
+        val request = DirectSmsExtractorRequest(
+            evidence.body,
+            SmsProcessingJson.senderFamily(evidence.sender),
+            operation.configuration.primaryCurrency,
+            operation.configuration.enabledProfiles,
+            SmsProcessingJson.advisoryEvidence(analysis),
+            SmsContractAssets.readExtractorPrompt(context.assets),
+            if (grammarEnabled) SmsContractAssets.readExtractorGrammar(context.assets) else "",
+            SlmTokenCallback(tokenRelay::onToken)
+        )
+        val profile = CandidateSelectorRuntimeProfile()
+        store.transition(claim, "triaged", "selector_running", System.currentTimeMillis())
+        emit(claim, "selector_execution", "running", emptyList(), observer)
+        emitTransient(
+            operation.operationId,
+            observer,
+            SmsProcessingTransientEvent.InferenceStarted(
+                model,
+                grammarEnabled = grammarEnabled,
+                answerTokenBudget = profile.answerTokenLimit
+            )
+        )
+        val startedAt = System.currentTimeMillis()
+        val runtimeResult = runExtractor(preferredLease, model, request)
+        emitTransient(
+            operation.operationId,
+            observer,
+            SmsProcessingTransientEvent.InferenceCompleted(runtimeResult)
+        )
+        if (runtimeResult.completion == "interrupted") {
+            recordAttempt(claim, profile, request.payload(), runtimeResult, null, startedAt)
+            emit(
+                claim,
+                "selector_execution",
+                "interrupted",
+                listOf("operation_interrupted"),
                 observer
+            )
+            throw CancellationException("operation interrupted")
+        }
+        val raw = runtimeResult.rawOutput
+        if (raw == null) {
+            recordAttempt(claim, profile, request.payload(), runtimeResult, null, startedAt)
+            val reason = runtimeResult.safeErrorCode ?: "runtime_failure"
+            emit(claim, "selector_execution", "failed", listOf(reason), observer)
+            return retainOwned(
+                claim,
+                operation,
+                listOf(reason),
+                observer,
+                reviewEvidence(analysis, "extractor_execution")
             )
         }
         emit(claim, "selector_execution", "completed", emptyList(), observer)
-        val selection = try {
-            validator.validate(raw, analysis, profile.rawOutputByteLimit)
-        } catch (error: GroundedSelectorValidationException) {
-            store.recordSelectorAttempt(
-                claim,
-                runtimeProfileJson(profile),
-                selectorPayload,
+
+        val parsed = try {
+            SmsExtractorValidator.validate(raw, evidence.body, profile.rawOutputByteLimit)
+        } catch (error: SmsExtractorValidationException) {
+            val partial = SmsExtractorValidator.collectGroundedFields(
                 raw,
-                "invalid",
-                null,
-                error.reasonCode,
-                startedAt,
-                System.currentTimeMillis()
+                evidence.body,
+                operation.configuration.primaryCurrency,
+                operation.configuration.enabledProfiles,
+                profile.rawOutputByteLimit
             )
-            emit(
+            recordAttempt(
                 claim,
-                "selector_validation",
-                "failed",
-                listOf(error.reasonCode),
-                observer
+                profile,
+                request.payload(),
+                runtimeResult,
+                null,
+                startedAt,
+                error.reasonCode
             )
-            return retainOwned(claim, operation, listOf(error.reasonCode), observer)
+            emit(claim, "selector_validation", "failed", listOf(error.reasonCode), observer)
+            return retainOwned(
+                claim,
+                operation,
+                listOf(error.reasonCode),
+                observer,
+                reviewEvidence(analysis, "extractor_validation", partial = partial)
+            )
         }
-        store.recordSelectorAttempt(
+        val normalized = try {
+            (parsed as? SmsExtractorResult.Posted)?.let {
+                SmsExtractorNormalizer.normalize(
+                    it,
+                    operation.configuration.primaryCurrency,
+                    operation.configuration.enabledProfiles
+                )
+            }
+        } catch (error: SmsExtractorValidationException) {
+            val partial = SmsExtractorValidator.collectGroundedFields(
+                raw,
+                evidence.body,
+                operation.configuration.primaryCurrency,
+                operation.configuration.enabledProfiles,
+                profile.rawOutputByteLimit
+            )
+            recordAttempt(
+                claim,
+                profile,
+                request.payload(),
+                runtimeResult,
+                null,
+                startedAt,
+                error.reasonCode
+            )
+            emit(claim, "selector_validation", "failed", listOf(error.reasonCode), observer)
+            return retainOwned(
+                claim,
+                operation,
+                listOf(error.reasonCode),
+                observer,
+                reviewEvidence(analysis, "normalization", partial = partial)
+            )
+        }
+        recordAttempt(
             claim,
-            runtimeProfileJson(profile),
-            selectorPayload,
-            raw,
-            "complete",
-            selectionJson(selection),
-            null,
-            startedAt,
-            System.currentTimeMillis()
+            profile,
+            request.payload(),
+            runtimeResult,
+            SmsProcessingJson.validated(parsed),
+            startedAt
         )
         store.transition(claim, "selector_running", "selector_recorded", System.currentTimeMillis())
         emit(claim, "selector_validation", "completed", emptyList(), observer)
         store.transition(claim, "selector_recorded", "validated", System.currentTimeMillis())
-
-        val reconstructed = if (selection.decision == SelectorDecision.POSTED) {
-            reconstructor.reconstruct(selection, analysis, operation).also {
-                store.recordReconstruction(claim, reconstructionJson(it), System.currentTimeMillis())
-                store.transition(claim, "validated", "reconstructed", System.currentTimeMillis())
-                emit(claim, "reconstruction", "completed", emptyList(), observer)
-            }
-        } else {
-            null
+        claim = store.heartbeat(claim, System.currentTimeMillis())
+        return when (parsed) {
+            SmsExtractorResult.None -> settleNotPosted(claim, operation, observer)
+            SmsExtractorResult.Abstain -> settleAbstain(claim, operation, analysis, observer)
+            is SmsExtractorResult.Posted -> settlePosted(
+                claim,
+                operation,
+                analysis,
+                requireNotNull(normalized),
+                observer
+            )
         }
-        val accountResolution = accountResolver.resolve(reconstructed?.accountEvidence)
-        emit(claim, "account_resolution", "completed", emptyList(), observer)
-        val gateClaim = store.heartbeat(claim, System.currentTimeMillis())
-        val decision = gate.evaluate(
-            analysis,
-            triage,
-            selection,
-            reconstructed,
-            accountResolution,
+    }
+
+    private suspend fun runExtractor(
+        preferredLease: SlmLease?,
+        model: SlmModelSpec,
+        request: DirectSmsExtractorRequest
+    ): DirectCandidateSelectorResult = try {
+        if (preferredLease != null) {
+            extractor.extract(preferredLease, request)
+        } else {
+            runtime.withLease(SlmRuntimeOwner.SMS_WORKER, model) { extractor.extract(it, request) }
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        DirectCandidateSelectorResult(null, "failed", "runtime_failure", model, null, null)
+    }
+
+    private suspend fun settlePrefilterExcluded(
+        claim: SmsOperationClaim,
+        operation: SmsOperationSnapshot,
+        prefilter: SmsPrefilter.Result,
+        observer: SmsProcessingObserver
+    ): SmsProcessingOutcome {
+        val reasons = listOf(prefilter.traceReasonCode, "tombstoned_excluded").distinct().sorted()
+        val now = System.currentTimeMillis()
+        emit(claim, "prefilter", "completed", reasons, observer)
+        store.recordReconstruction(
+            claim = claim,
+            semanticResultJson = SmsProcessingJson.result(
+                status = "tombstoned_excluded",
+                decision = null,
+                semantic = null,
+                operation = operation,
+                account = null,
+                duplicate = null,
+                gate = null,
+                reasons = reasons
+            ),
+            now = now,
+            contractVersion = SmsContractAssets.PROCESSING_RESULT_CONTRACT,
+            recognitionDecision = "tombstoned_excluded",
+            transactionFingerprint = null
+        )
+        store.transition(claim, "claimed", "reconstructed", now)
+        emit(claim, "settlement", "completed", reasons, observer)
+        store.settleDiscarded(
+            claim = claim,
+            reason = prefilter.traceReasonCode,
+            now = now,
+            retentionState = SmsProcessingStore.RETENTION_TOMBSTONED_EXCLUDED
+        )
+        return SmsProcessingOutcome.TerminallyDiscarded(
+            operation.operationId,
+            prefilter.traceReasonCode
+        )
+    }
+
+    private suspend fun settleNotPosted(
+        claim: SmsOperationClaim,
+        operation: SmsOperationSnapshot,
+        observer: SmsProcessingObserver
+    ): SmsProcessingOutcome {
+        val reasons = listOf("extractor_none", "tombstoned_none").distinct().sorted()
+        val accountReason = "account_resolution_unresolved"
+        val gate = SmsProcessingJson.gate(false, accountReason, "clear")
+        val account = SmsProcessingJson.account(GroundedAccountResolution.Missing, "")
+        val duplicate = SmsProcessingJson.duplicate(
+            "clear", operation.configuration.sourceId, operation.stableEventId, null
+        )
+        recordResult(
+            claim,
             operation,
-            claimOwnershipCurrent = true
+            "none",
+            "tombstoned_none",
+            null,
+            account,
+            duplicate,
+            gate,
+            reasons
         )
         store.recordGateDecision(
-            gateClaim,
-            decision.result.wireValue,
-            decision.primaryReason,
-            checksJson(decision.checks),
-            accountResolutionJson(accountResolution),
-            operation.configuration.rolloutMode,
+            claim,
+            "not_posted",
+            "persistence_not_posted",
+            SmsProcessingJson.checksJson(false, accountReason, "clear"),
+            CanonicalAndroidJson.stringify(account),
+            "automatic",
             System.currentTimeMillis()
         )
+        emit(claim, "persistence_gate", "completed", reasons, observer)
+        emit(claim, "settlement", "completed", reasons, observer)
+        store.settleDiscarded(
+            claim = claim,
+            reason = "extractor_none",
+            now = System.currentTimeMillis(),
+            retentionState = SmsProcessingStore.RETENTION_TOMBSTONED_NONE
+        )
+        return SmsProcessingOutcome.TerminallyDiscarded(operation.operationId, "extractor_none")
+    }
+
+    private suspend fun settleAbstain(
+        claim: SmsOperationClaim,
+        operation: SmsOperationSnapshot,
+        analysis: SmsAnalysis,
+        observer: SmsProcessingObserver
+    ): SmsProcessingOutcome {
+        val reasons = listOf("extractor_abstained")
+        recordResult(claim, operation, "abstain", "review", null, null, null, null, reasons)
+        return retainOwned(
+            claim,
+            operation,
+            reasons,
+            observer,
+            reviewEvidence(analysis, "extractor_validation")
+        )
+    }
+
+    private suspend fun settlePosted(
+        claim: SmsOperationClaim,
+        operation: SmsOperationSnapshot,
+        analysis: SmsAnalysis,
+        normalized: NormalizedSmsExtraction,
+        observer: SmsProcessingObserver
+    ): SmsProcessingOutcome {
+        val resolution = accountResolver.resolve(normalized.accountReference)
         emit(
-            gateClaim,
-            "persistence_gate",
+            claim,
+            "account_resolution",
             "completed",
-            listOf(decision.primaryReason),
+            SmsProcessingJson.accountReasons(resolution),
             observer
+        )
+        val accountId = (resolution as? GroundedAccountResolution.UniquelyResolved)?.accountId
+        val fingerprint = SmsProcessingStore.sha256(
+            "${normalized.minorUnits}\u0000${normalized.currency}\u0000${normalized.direction}\u0000" +
+                "${accountId.orEmpty()}\u0000${operation.configuration.receivedTimestampEpochMs}"
+        )
+        val matches = store.duplicateMatchCounts(
+            operationId = operation.operationId,
+            sourceId = operation.configuration.sourceId,
+            stableEventId = operation.stableEventId,
+            transactionFingerprint = fingerprint,
+            accountId = accountId,
+            direction = normalized.direction,
+            minorUnits = normalized.minorUnits,
+            currency = normalized.currency,
+            occurredAtEpochMs = operation.configuration.receivedTimestampEpochMs,
+            duplicateWindowMs = SmsContractAssets.DUPLICATE_WINDOW_MS
+        )
+        val duplicateStatus = when {
+            matches.persistedSourceEvents > 0 -> "already_persisted"
+            matches.matchingTransactionFingerprints > 0 || matches.windowDuplicateMatches > 0 ->
+                "possible_duplicate"
+            else -> "clear"
+        }
+        val accountReasons = SmsProcessingJson.accountReasons(resolution)
+        val reasons = buildList {
+            addAll(accountReasons)
+            when (duplicateStatus) {
+                "already_persisted" -> add("duplicate_already_persisted")
+                "clear" -> Unit
+                else -> add("duplicate_possible")
+            }
+        }.distinct().sorted()
+        val accountJson = SmsProcessingJson.account(resolution, normalized.accountReference)
+        val duplicateJson = SmsProcessingJson.duplicate(
+            duplicateStatus,
+            operation.configuration.sourceId,
+            operation.stableEventId,
+            fingerprint
+        )
+        val accountReason = accountReasons.firstOrNull()
+        val gate = SmsProcessingJson.gate(true, accountReason, duplicateStatus)
+        if (gate.getString("result") != "eligible" || accountId == null) {
+            recordResult(
+                claim,
+                operation,
+                "posted",
+                "review",
+                SmsProcessingJson.semantic(normalized),
+                accountJson,
+                duplicateJson,
+                gate,
+                reasons,
+                fingerprint
+            )
+            emit(claim, "reconstruction", "completed", emptyList(), observer)
+            store.recordGateDecision(
+                claim,
+                gate.getString("result"),
+                gate.getString("primary_reason"),
+                SmsProcessingJson.checksJson(true, accountReason, duplicateStatus),
+                CanonicalAndroidJson.stringify(accountJson),
+                "automatic",
+                System.currentTimeMillis()
+            )
+            emit(claim, "persistence_gate", "completed", reasons, observer)
+            return retainOwned(
+                claim,
+                operation,
+                reasons,
+                observer,
+                reviewEvidence(analysis, "duplicate_assessment", normalized = normalized)
+            )
+        }
+
+        val resultJson = SmsProcessingJson.result(
+            "eligible",
+            "posted",
+            SmsProcessingJson.semantic(normalized),
+            operation,
+            accountJson,
+            duplicateJson,
+            gate,
+            emptyList()
+        )
+        emit(claim, "reconstruction", "completed", emptyList(), observer)
+        emit(claim, "persistence_gate", "completed", emptyList(), observer)
+        emit(claim, "settlement", "running", emptyList(), observer)
+        return try {
+            val receipt = store.persistEligibleTransaction(
+                claim,
+                SmsAutomaticTransactionInput(
+                    amountMinorUnits = normalized.minorUnits,
+                    currency = normalized.currency,
+                    direction = normalized.direction,
+                    counterparty = normalized.counterparty,
+                    accountId = accountId,
+                    occurredAtEpochMs = operation.configuration.receivedTimestampEpochMs,
+                    timestampProvenance = operation.configuration.receivedTimestampProvenance,
+                    modelIdentifier = requireNotNull(operation.configuration.modelIdentifier),
+                    processingResultJson = resultJson,
+                    transactionFingerprint = fingerprint,
+                    checksJson = SmsProcessingJson.checksJson(true, null, "clear"),
+                    accountResolutionJson = CanonicalAndroidJson.stringify(accountJson)
+                ),
+                System.currentTimeMillis()
+            )
+            SmsProcessingOutcome.Persisted(
+                operation.operationId,
+                listOf(receipt.transactionId),
+                alreadyCommitted = false
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: SmsAutomaticPersistenceConflict) {
+            settlePersistenceFailure(
+                claim,
+                operation,
+                analysis,
+                normalized,
+                accountJson,
+                SmsProcessingJson.duplicate(
+                    "already_persisted",
+                    operation.configuration.sourceId,
+                    operation.stableEventId,
+                    fingerprint
+                ),
+                fingerprint,
+                "duplicate_already_persisted",
+                observer
+            )
+        } catch (_: Exception) {
+            settlePersistenceFailure(
+                claim,
+                operation,
+                analysis,
+                normalized,
+                accountJson,
+                duplicateJson,
+                fingerprint,
+                "persistence_atomic_write_failed",
+                observer
+            )
+        }
+    }
+
+    private suspend fun settlePersistenceFailure(
+        claim: SmsOperationClaim,
+        operation: SmsOperationSnapshot,
+        analysis: SmsAnalysis,
+        normalized: NormalizedSmsExtraction,
+        accountJson: JSONObject,
+        duplicateJson: JSONObject,
+        fingerprint: String,
+        reason: String,
+        observer: SmsProcessingObserver
+    ): SmsProcessingOutcome {
+        val gate = SmsProcessingJson.persistenceFailureGate(reason)
+        recordResult(
+            claim,
+            operation,
+            "posted",
+            "review",
+            SmsProcessingJson.semantic(normalized),
+            accountJson,
+            duplicateJson,
+            gate,
+            listOf(reason),
+            fingerprint
+        )
+        store.recordGateDecision(
+            claim,
+            "review_required",
+            reason,
+            SmsProcessingJson.persistenceFailureChecksJson(reason),
+            CanonicalAndroidJson.stringify(accountJson),
+            "automatic",
+            System.currentTimeMillis()
         )
         return retainOwned(
-            gateClaim,
+            claim,
             operation,
-            (triage.reasonCodes + decision.primaryReason).distinct().sorted(),
-            observer
+            listOf(reason),
+            observer,
+            reviewEvidence(analysis, "persistence_gate", normalized = normalized)
         )
     }
 
-    override suspend fun requestStop(operationId: String): SmsProcessingStopReceipt {
-        val receipt = store.requestStop(operationId, System.currentTimeMillis())
-        return SmsProcessingStopReceipt(
-            receipt.operationId,
-            receipt.reviewCaseId,
-            receipt.state,
-            receipt.committed
+    private suspend fun recordResult(
+        claim: SmsOperationClaim,
+        operation: SmsOperationSnapshot,
+        decision: String?,
+        status: String,
+        semantic: JSONObject?,
+        account: JSONObject?,
+        duplicate: JSONObject?,
+        gate: JSONObject?,
+        reasons: List<String>,
+        fingerprint: String? = null
+    ) {
+        store.recordReconstruction(
+            claim,
+            SmsProcessingJson.result(
+                status,
+                decision,
+                semantic,
+                operation,
+                account,
+                duplicate,
+                gate,
+                reasons
+            ),
+            System.currentTimeMillis(),
+            contractVersion = SmsContractAssets.PROCESSING_RESULT_CONTRACT,
+            recognitionDecision = decision ?: status,
+            transactionFingerprint = fingerprint
         )
+        store.transition(claim, "validated", "reconstructed", System.currentTimeMillis())
     }
 
-    fun currentSelectorModelId(): String? {
+    private suspend fun recordAttempt(
+        claim: SmsOperationClaim,
+        profile: CandidateSelectorRuntimeProfile,
+        requestJson: String,
+        result: DirectCandidateSelectorResult,
+        validated: String?,
+        startedAt: Long,
+        overrideError: String? = null
+    ) = store.recordSelectorAttempt(
+        claim = claim,
+        runtimeProfileJson = CanonicalAndroidJson.stringify(
+            JSONObject()
+                .put("generation_mode", profile.generationMode)
+                .put("decoding", profile.decoding)
+                .put("answer_token_limit", profile.answerTokenLimit)
+                .put("raw_output_utf8_byte_limit", profile.rawOutputByteLimit)
+                .put("parser_deadline_ms", profile.deadlineMs)
+        ),
+        requestJson = requestJson,
+        rawOutput = result.rawOutput,
+        completion = if (overrideError == null) result.completion else "invalid",
+        validatedSelectionJson = validated,
+        safeErrorCode = overrideError ?: result.safeErrorCode,
+        startedAt = startedAt,
+        completedAt = System.currentTimeMillis()
+    )
+
+    private fun reviewEvidence(
+        analysis: SmsAnalysis,
+        furthestStage: String,
+        normalized: NormalizedSmsExtraction? = null,
+        partial: List<SmsPartialFieldEvidence> = emptyList()
+    ): SmsReviewV2Evidence = SmsReviewV2Evidence(
+        furthestStage = furthestStage,
+        analyzerSuggestionsJson = CanonicalAndroidJson.stringify(
+            SmsProcessingJson.reviewAnalyzerSuggestions(analysis)
+        ),
+        fieldEvidenceJson = CanonicalAndroidJson.stringify(
+            SmsProcessingJson.fieldEvidence(analysis, normalized, partial)
+        )
+    )
+
+    private fun resolveCurrentModel(): SlmModelSpec? {
         val device = deviceCapabilities.assessDevice()
-        return resolveActiveSlmTier(context, modelStorage.modelDirectory, device)?.id
+        val tier = resolveActiveSlmTier(context, modelStorage.modelDirectory, device) ?: return null
+        val file = modelStorage.modelFile(tier.modelFile)
+        if (!file.isFile || file.length() <= 0L) return null
+        return SlmModelSpec(
+            tier.id,
+            file.canonicalPath,
+            "${tier.modelFile}:${file.length()}:${file.lastModified()}",
+            3072,
+            0,
+            0,
+            device.cpu?.hasFp16 ?: false
+        )
+    }
+
+    private fun identityFor(model: SlmModelSpec?): SmsModelIdentity {
+        if (model == null) return SmsModelIdentity(false, null, null)
+        val file = File(model.modelPath)
+        if (!file.isFile || file.length() <= 0L) {
+            return SmsModelIdentity(false, model.modelId, null)
+        }
+        return runCatching {
+            SmsModelIdentity(true, model.modelId, sha256File(file))
+        }.getOrElse { SmsModelIdentity(false, model.modelId, null) }
+    }
+
+    private fun sha256File(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                if (count > 0) digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun kotlinx.coroutines.CoroutineScope.launchHeartbeat(
-        claim: com.pocketfinancer.data.repository.SmsOperationClaim
+        claim: SmsOperationClaim
     ): Job = launch {
-        var renewable = claim
+        var current = claim
         while (true) {
             delay(SmsProcessingStore.CLAIM_HEARTBEAT_MS)
-            renewable = store.heartbeat(renewable, System.currentTimeMillis())
+            current = store.heartbeat(current, System.currentTimeMillis())
+        }
+    }
+
+    private suspend fun emit(
+        claim: SmsOperationClaim,
+        stage: String,
+        status: String,
+        reasons: List<String>,
+        observer: SmsProcessingObserver
+    ) {
+        val safeReasons = reasons.distinct().sorted()
+        val receipt = store.appendTrace(
+            claim,
+            stage,
+            status,
+            safeReasons,
+            null,
+            System.currentTimeMillis()
+        )
+        runCatching {
+            observer.onEvent(
+                SmsProcessingObserverEvent(
+                    claim.operationId,
+                    receipt.sequence,
+                    stage,
+                    status,
+                    safeReasons
+                )
+            )
+        }
+    }
+
+    private fun emitTransient(
+        operationId: String,
+        observer: SmsProcessingObserver,
+        transient: SmsProcessingTransientEvent
+    ) {
+        runCatching {
+            observer.onEvent(
+                SmsProcessingObserverEvent(
+                    operationId,
+                    -1,
+                    "selector_execution",
+                    "running",
+                    emptyList(),
+                    transient
+                )
+            )
         }
     }
 
     private suspend fun retainOwned(
-        claim: com.pocketfinancer.data.repository.SmsOperationClaim,
+        claim: SmsOperationClaim,
         operation: SmsOperationSnapshot,
         reasons: List<String>,
-        observer: SmsProcessingObserver
+        observer: SmsProcessingObserver,
+        evidence: SmsReviewV2Evidence
     ): SmsProcessingOutcome {
-        val safeReasons = reasons.ifEmpty {
-            listOf("persistence_triage_requires_review")
-        }.distinct().sorted()
-        emit(claim, "settlement", "retained", safeReasons, observer)
-        val reviewId = store.retainForReview(claim, safeReasons, System.currentTimeMillis())
-        return SmsProcessingOutcome.RetainedForReview(operation.operationId, reviewId, safeReasons)
+        val safe = reasons.ifEmpty { listOf("persistence_triage_requires_review") }
+            .distinct().sorted()
+        emit(claim, "settlement", "retained", safe, observer)
+        val reviewId = store.retainForReview(
+            claim,
+            safe,
+            System.currentTimeMillis(),
+            evidence
+        )
+        return SmsProcessingOutcome.RetainedForReview(operation.operationId, reviewId, safe)
     }
 
     private suspend fun retainWithoutClaim(
         operation: SmsOperationSnapshot,
         reasons: List<String>
     ): SmsProcessingOutcome {
-        val settled = settledOutcome(operation)
-        if (settled != null) return settled
+        settledOutcome(operation)?.let { return it }
         val reason = reasons.firstOrNull() ?: "operation_interrupted"
-        val reviewCaseId = store.retainUnownedForReview(
+        val reviewId = store.retainUnownedForReview(
             operation.operationId,
             reason,
             System.currentTimeMillis()
         )
-        return if (reviewCaseId != null) {
-            SmsProcessingOutcome.RetainedForReview(
-                operation.operationId,
-                reviewCaseId,
-                reasons.ifEmpty { listOf(reason) }
-            )
+        return if (reviewId != null) {
+            SmsProcessingOutcome.RetainedForReview(operation.operationId, reviewId, reasons)
         } else {
             SmsProcessingOutcome.RetryableFailure(
                 operation.operationId,
@@ -430,132 +930,49 @@ class DefaultSmsProcessingCoordinator @Inject constructor(
         val settled = store.settledReceipt(operation.operationId) ?: return null
         return when (settled.first) {
             "discarded" -> SmsProcessingOutcome.TerminallyDiscarded(
-                operation.operationId, "already_discarded"
+                operation.operationId,
+                "already_discarded"
             )
-            "persisted" -> SmsProcessingOutcome.Persisted(
-                operation.operationId, emptyList(), true
-            )
+            "persisted" -> {
+                val ids = runCatching {
+                    val values = JSONObject(settled.second ?: "{}").getJSONArray("transaction_ids")
+                    (0 until values.length()).map(values::getString)
+                }.getOrDefault(emptyList())
+                SmsProcessingOutcome.Persisted(operation.operationId, ids, true)
+            }
             "retain_review" -> SmsProcessingOutcome.RetainedForReview(
                 operation.operationId,
-                store.reviewCaseIdForOperation(operation.operationId)
-                    ?: return null,
+                store.reviewCaseIdForOperation(operation.operationId) ?: return null,
                 listOf("persistence_triage_requires_review")
             )
             else -> null
         }
     }
 
-    private suspend fun emit(
-        claim: com.pocketfinancer.data.repository.SmsOperationClaim,
-        stage: String,
-        status: String,
-        reasons: List<String>,
-        observer: SmsProcessingObserver
+    private class LiveTokenRelay(
+        private val operationId: String,
+        private val observer: SmsProcessingObserver
     ) {
-        val receipt = store.appendTrace(
-            claim, stage, status, reasons.distinct(), null, System.currentTimeMillis()
-        )
-        runCatching {
-            observer.onEvent(
-                SmsProcessingObserverEvent(
-                    claim.operationId, receipt.sequence, stage, status, reasons
+        private val cumulative = StringBuilder()
+
+        @Synchronized
+        fun onToken(delta: String) {
+            cumulative.append(delta)
+            runCatching {
+                observer.onEvent(
+                    SmsProcessingObserverEvent(
+                        operationId = operationId,
+                        sequence = -1,
+                        stage = "selector_execution",
+                        status = "running",
+                        reasonCodes = emptyList(),
+                        transient = SmsProcessingTransientEvent.DecodedToken(
+                            delta = delta,
+                            cumulativeStructuredOutput = cumulative.toString()
+                        )
+                    )
                 )
-            )
-        }
-    }
-
-    private fun resolveModel(operation: SmsOperationSnapshot): SlmModelSpec? {
-        val device = deviceCapabilities.assessDevice()
-        val tier = resolveActiveSlmTier(context, modelStorage.modelDirectory, device) ?: return null
-        if (tier.id != operation.configuration.selectorModelId) return null
-        val file = modelStorage.modelFile(tier.modelFile)
-        if (!file.exists() || file.length() == 0L) return null
-        return SlmModelSpec(
-            tier.id,
-            file.canonicalPath,
-            "${tier.modelFile}:${file.length()}:${file.lastModified()}",
-            3072,
-            0,
-            0,
-            device.cpu?.hasFp16 ?: false
-        )
-    }
-
-    private fun selectorPayload(source: String, analysis: SmsAnalysis): String {
-        return groundedSelectorPayload(source, analysis)
-    }
-
-    private fun analysisJson(value: SmsAnalysis): String = value.canonicalJson()
-
-    private fun selectionJson(value: GroundedSelectorResult): String = when (value.decision) {
-        SelectorDecision.NONE -> "{\"decision\":\"none\"}"
-        SelectorDecision.ABSTAIN -> "{\"decision\":\"abstain\"}"
-        SelectorDecision.POSTED -> value.posted!!.let {
-            CanonicalAndroidJson.stringify(
-                JSONObject()
-                    .put("decision", "posted")
-                    .put("amount", it.amountCandidateId)
-                    .put("direction", it.directionCandidateId)
-                    .put("account", it.accountCandidateId)
-                    .put("counterparty", it.counterpartyCandidateId)
-            )
-        }
-    }
-
-    private fun reconstructionJson(value: ReconstructedSmsTransaction): String =
-        CanonicalAndroidJson.stringify(
-            JSONObject()
-                .put("analysis_id", value.analysisId)
-                .put("stable_event_id", value.stableEventId)
-                .put("minor_units", value.minorUnits)
-                .put("currency", value.currency)
-                .put("currency_scale", value.currencyScale)
-                .put("currency_provenance", value.currencyProvenance)
-                .put("direction", value.direction)
-                .put("account_evidence", value.accountEvidence ?: JSONObject.NULL)
-                .put("counterparty_evidence", value.counterpartyEvidence ?: JSONObject.NULL)
-                .put("occurred_at_epoch_ms", value.occurredAtEpochMs ?: JSONObject.NULL)
-                .put("timestamp_provenance", value.timestampProvenance)
-        )
-
-    private fun checksJson(values: List<PersistenceGateCheck>): String =
-        CanonicalAndroidJson.stringify(
-            JSONArray(values.map { value ->
-                JSONObject()
-                    .put("check", value.check)
-                    .put("passed", value.passed)
-                    .put("reason_code", value.reasonCode ?: JSONObject.NULL)
-            })
-        )
-
-    private fun accountResolutionJson(value: GroundedAccountResolution): String =
-        CanonicalAndroidJson.stringify(
-            when (value) {
-                GroundedAccountResolution.Missing -> JSONObject().put("result", "missing")
-                GroundedAccountResolution.Unresolved -> JSONObject().put("result", "unresolved")
-                is GroundedAccountResolution.Ambiguous -> JSONObject()
-                    .put("result", "ambiguous")
-                    .put("account_ids", JSONArray(value.accountIds))
-                is GroundedAccountResolution.UniquelyResolved -> JSONObject()
-                    .put("result", "unique")
-                    .put("account_id", value.accountId)
-                    .put("matched_alias_hash", value.matchedAliasHash)
-                    .put("provenance", value.provenance)
             }
-        )
-
-    private fun runtimeProfileJson(value: CandidateSelectorRuntimeProfile): String =
-        CanonicalAndroidJson.stringify(
-            JSONObject()
-                .put("generation_mode", value.generationMode)
-                .put("decoding", value.decoding)
-                .put("answer_token_limit", value.answerTokenLimit)
-                .put("raw_output_utf8_byte_limit", value.rawOutputByteLimit)
-                .put("parser_deadline_ms", value.deadlineMs)
-        )
-
-    private fun readAsset(path: String): String = context.assets.open(path).bufferedReader().use {
-        it.readText()
+        }
     }
-
 }

@@ -98,26 +98,6 @@ class StructuralSmsAnalyzer {
         configurationHash = operation.configurationHash,
         primaryCurrency = operation.configuration.primaryCurrency,
         enabledProfiles = operation.configuration.enabledProfiles,
-        sourceTimestampEpochMs = operation.configuration.sourceTimestampEpochMs,
-        sourceTimestampProvenance = operation.configuration.sourceTimestampProvenance
-    )
-
-    fun analyze(source: String, operation: SmsV4OperationSnapshot): SmsAnalysis = analyze(
-        source = source,
-        operationId = operation.operationId,
-        configurationHash = operation.configurationHash,
-        primaryCurrency = operation.configuration.primaryCurrency,
-        enabledProfiles = operation.configuration.enabledProfiles,
-        sourceTimestampEpochMs = operation.configuration.receivedTimestampEpochMs,
-        sourceTimestampProvenance = operation.configuration.receivedTimestampProvenance
-    )
-
-    fun analyze(source: String, operation: SmsV5OperationSnapshot): SmsAnalysis = analyze(
-        source = source,
-        operationId = operation.operationId,
-        configurationHash = operation.configurationHash,
-        primaryCurrency = operation.configuration.primaryCurrency,
-        enabledProfiles = operation.configuration.enabledProfiles,
         sourceTimestampEpochMs = operation.configuration.receivedTimestampEpochMs,
         sourceTimestampProvenance = operation.configuration.receivedTimestampProvenance
     )

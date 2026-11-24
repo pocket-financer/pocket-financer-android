@@ -6,28 +6,23 @@ import com.pocketfinancer.data.repository.ProcessingConfigurationRepository
 import com.pocketfinancer.data.repository.SmsAdmissionBusyException
 import com.pocketfinancer.data.repository.SmsOperationClaim
 import com.pocketfinancer.data.repository.SmsProcessingAdmission
-import com.pocketfinancer.data.repository.SmsReviewRetryContext
 import com.pocketfinancer.data.repository.SmsProcessingStore
-import com.pocketfinancer.inference.SlmLease
+import com.pocketfinancer.data.repository.SmsReviewRetryContext
 import com.pocketfinancer.inference.DirectCandidateSelectorResult
 import com.pocketfinancer.inference.SlmCacheDiagnostics
+import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelSpec
 import com.pocketfinancer.inference.SlmPerformanceData
 import com.pocketfinancer.pipeline.sms.DefaultSmsProcessingCoordinator
-import com.pocketfinancer.pipeline.sms.DefaultSmsV4ProcessingCoordinator
-import com.pocketfinancer.pipeline.sms.DefaultSmsV5ProcessingCoordinator
+import com.pocketfinancer.pipeline.sms.SmsContractAssets
+import com.pocketfinancer.pipeline.sms.SmsModelIdentity
+import com.pocketfinancer.pipeline.sms.SmsOperationConfiguration
 import com.pocketfinancer.pipeline.sms.SmsOperationSnapshot
 import com.pocketfinancer.pipeline.sms.SmsOperationSnapshotFactory
-import com.pocketfinancer.pipeline.sms.SmsProcessingOutcome
 import com.pocketfinancer.pipeline.sms.SmsProcessingObserver
 import com.pocketfinancer.pipeline.sms.SmsProcessingObserverEvent
+import com.pocketfinancer.pipeline.sms.SmsProcessingOutcome
 import com.pocketfinancer.pipeline.sms.SmsProcessingTransientEvent
-import com.pocketfinancer.pipeline.sms.SmsV4ModelIdentity
-import com.pocketfinancer.pipeline.sms.SmsV4OperationSnapshot
-import com.pocketfinancer.pipeline.sms.SmsV4OperationSnapshotFactory
-import com.pocketfinancer.pipeline.sms.SmsV5OperationConfiguration
-import com.pocketfinancer.pipeline.sms.SmsV5OperationSnapshot
-import com.pocketfinancer.pipeline.sms.SmsV5OperationSnapshotFactory
 import com.pocketfinancer.sms.SmsReader
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -50,10 +45,6 @@ class PipelineServiceTest {
     private lateinit var snapshotFactory: SmsOperationSnapshotFactory
     private lateinit var configuration: ProcessingConfigurationRepository
     private lateinit var coordinator: DefaultSmsProcessingCoordinator
-    private lateinit var v4SnapshotFactory: SmsV4OperationSnapshotFactory
-    private lateinit var v4Coordinator: DefaultSmsV4ProcessingCoordinator
-    private lateinit var v5SnapshotFactory: SmsV5OperationSnapshotFactory
-    private lateinit var v5Coordinator: DefaultSmsV5ProcessingCoordinator
     private lateinit var grammarPreferences: SlmProcessingPreferences
     private lateinit var lease: SlmLease
     private lateinit var pipeline: PipelineService
@@ -77,10 +68,6 @@ class PipelineServiceTest {
         snapshotFactory = mockk()
         configuration = mockk()
         coordinator = mockk()
-        v4SnapshotFactory = mockk()
-        v4Coordinator = mockk()
-        v5SnapshotFactory = mockk()
-        v5Coordinator = mockk()
         grammarPreferences = mockk()
         every { grammarPreferences.gbnfGrammarEnabled } returns MutableStateFlow(false)
         lease = mockk()
@@ -89,20 +76,18 @@ class PipelineServiceTest {
             modelPath = "synthetic-model.gguf"
         )
         every { configuration.enabledProfiles("INR") } returns listOf("core-en", "india")
-        every { v5Coordinator.modelIdentityForLease(lease) } returns
-            SmsV4ModelIdentity(true, "test-selector", "a".repeat(64))
-        every { v5Coordinator.currentModelIdentity() } returns
-            SmsV4ModelIdentity(false, null, null)
+        every { coordinator.modelIdentityForLease(lease) } returns
+            SmsModelIdentity(true, "test-selector", "a".repeat(64))
+        every { coordinator.currentModelIdentity() } returns
+            SmsModelIdentity(false, null, null)
         coEvery {
-            v5SnapshotFactory.create(
+            snapshotFactory.create(
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
                 any(), any(), any()
             )
         } returns snapshot
         pipeline = PipelineService(
-            store, snapshotFactory, configuration, coordinator,
-            v4SnapshotFactory, v4Coordinator, v5SnapshotFactory, v5Coordinator,
-            grammarPreferences
+            store, snapshotFactory, configuration, coordinator, grammarPreferences
         )
     }
 
@@ -138,10 +123,13 @@ class PipelineServiceTest {
 
         assertFalse(pipeline.hasVerifiedSavedSource(message().copy(providerMessageId = null)))
         coVerify(exactly = 0) { store.verifiedSavedSourceTransactionIds(any()) }
+
+        every { configuration.confirmedPrimaryCurrency() } returns null
         assertFalse(pipeline.hasVerifiedSavedSource(message()))
+        assertEquals(PipelineService.ProcessingResult.AwaitingConfiguration, pipeline.processSingle(message()))
         coVerify(exactly = 1) { store.verifiedSavedSourceTransactionIds(any()) }
-        coVerify(exactly = 0) { store.admitForProcessing(any(), any()) }
-        verify(exactly = 0) { configuration.confirmedPrimaryCurrency() }
+        coVerify(exactly = 1) { store.admitForProcessing(any(), any()) }
+        verify(exactly = 1) { configuration.confirmedPrimaryCurrency() }
         assertNoNewExtraction()
     }
 
@@ -159,9 +147,10 @@ class PipelineServiceTest {
         assertEquals(PipelineService.ProcessingResult.AwaitingConfiguration, pipeline.processSingle(sms))
 
         val admitted = admittedSources.single()
-        assertEquals(admitted.copy(
-            origin = "discovery", admittedAt = checkNotNull(discovered).admittedAt
-        ), discovered)
+        assertEquals(
+            admitted.copy(origin = "discovery", admittedAt = checkNotNull(discovered).admittedAt),
+            discovered
+        )
         assertNoNewExtraction()
     }
 
@@ -179,18 +168,18 @@ class PipelineServiceTest {
         assertEquals(PipelineService.ProcessingResult.AwaitingConfiguration, result)
         coVerify(exactly = 1) { store.admitForProcessing(any(), any()) }
         coVerify(exactly = 0) {
-            v5SnapshotFactory.create(
+            snapshotFactory.create(
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
                 any(), any(), any()
             )
         }
-        coVerify(exactly = 0) { v5Coordinator.processAdmitted(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { coordinator.processAdmitted(any(), any(), any(), any(), any()) }
     }
 
     @Test
     fun `configured processing delegates once and retains review outcome`() = runTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
-        coEvery { v5Coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
             SmsProcessingOutcome.RetainedForReview(
                 snapshot.operationId,
                 "review-id",
@@ -203,7 +192,7 @@ class PipelineServiceTest {
         assertEquals(PipelineService.SkipReason.RETAINED_FOR_REVIEW, skipped.reason)
         coVerify(exactly = 1) { store.admitForProcessing(any(), any()) }
         coVerify(exactly = 1) {
-            v5Coordinator.processAdmitted(any(), snapshot, any(), lease, any())
+            coordinator.processAdmitted(any(), snapshot, any(), lease, any())
         }
     }
 
@@ -212,30 +201,35 @@ class PipelineServiceTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
         val enabled = MutableStateFlow(false)
         every { grammarPreferences.gbnfGrammarEnabled } returns enabled
-        coEvery { v5Coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
             SmsProcessingOutcome.RetainedForReview(snapshot.operationId, "review-id", emptyList())
 
         pipeline.processSingle(message(), lease, trigger = "manual")
         coVerify(exactly = 1) {
-            v5SnapshotFactory.create(
+            snapshotFactory.create(
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
                 any(), any(), false
             )
         }
 
         enabled.value = true
-        pipeline.processSingle(message().copy(providerMessageId = "another-provider-id"), lease, trigger = "manual")
+        pipeline.processSingle(
+            message().copy(providerMessageId = "another-provider-id"),
+            lease,
+            trigger = "manual"
+        )
         coVerify(exactly = 1) {
-            v5SnapshotFactory.create(
+            snapshotFactory.create(
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
                 any(), any(), true
             )
         }
     }
+
     @Test
     fun `worker entrypoint lets coordinator retain an unavailable model`() = runTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
-        coEvery { v5Coordinator.processAdmitted(any(), snapshot, any(), null, any()) } returns
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), null, any()) } returns
             SmsProcessingOutcome.RetainedForReview(
                 snapshot.operationId,
                 "review-id",
@@ -246,16 +240,36 @@ class PipelineServiceTest {
 
         val skipped = assertIs<PipelineService.ProcessingResult.Skipped>(result)
         assertEquals(PipelineService.SkipReason.RETAINED_FOR_REVIEW, skipped.reason)
-        coVerify(exactly = 1) { v5Coordinator.processAdmitted(any(), snapshot, any(), null, any()) }
+        coVerify(exactly = 1) { coordinator.processAdmitted(any(), snapshot, any(), null, any()) }
         coVerify(exactly = 0) {
-            v5Coordinator.processAdmitted(any(), any(), any(), lease, any())
+            coordinator.processAdmitted(any(), any(), any(), lease, any())
         }
+    }
+
+    @Test
+    fun `queued realtime candidate operates on durable admittedSourceId`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), null, any()) } returns
+            SmsProcessingOutcome.TerminallyDiscarded(snapshot.operationId, "prefilter_otp_verification")
+        val providerlessSms = message().copy(providerMessageId = null)
+
+        val result = pipeline.processSingle(
+            sms = providerlessSms,
+            trigger = "realtime",
+            admittedSourceId = "durable-candidate-key-1"
+        )
+
+        val skipped = assertIs<PipelineService.ProcessingResult.Skipped>(result)
+        assertEquals(PipelineService.SkipReason.NOT_TRANSACTION, skipped.reason)
+        val admitted = admittedSources.single()
+        assertEquals("durable-candidate-key-1", admitted.id)
+        assertEquals(providerlessSms.sourceIdentity.messageId, admitted.sourceMessageId)
     }
 
     @Test
     fun `retryable coordinator outcome remains retryable`() = runTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
-        coEvery { v5Coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
             SmsProcessingOutcome.RetryableFailure(
                 snapshot.operationId,
                 "review-id",
@@ -274,7 +288,7 @@ class PipelineServiceTest {
     @Test
     fun `complete automatic outcome reports saved transaction exactly once`() = runTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
-        coEvery { v5Coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
             SmsProcessingOutcome.Persisted(
                 snapshot.operationId,
                 listOf("transaction-id"),
@@ -288,7 +302,7 @@ class PipelineServiceTest {
         assertEquals(listOf("transaction-id"), saved.transactionIds)
         assertEquals(false, saved.alreadyCommitted)
         coVerify(exactly = 1) {
-            v5Coordinator.processAdmitted(any(), snapshot, any(), lease, any())
+            coordinator.processAdmitted(any(), snapshot, any(), lease, any())
         }
     }
 
@@ -297,36 +311,44 @@ class PipelineServiceTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
         val model = SlmModelSpec("test-selector", "synthetic-model.gguf")
         coEvery {
-            v5Coordinator.processAdmitted(any(), snapshot, any(), lease, any())
+            coordinator.processAdmitted(any(), snapshot, any(), lease, any())
         } coAnswers {
             val observer = arg<SmsProcessingObserver>(4)
-            observer.onEvent(observerEvent(
-                SmsProcessingTransientEvent.InferenceStarted(model, true, 512)
-            ))
-            observer.onEvent(observerEvent(
-                SmsProcessingTransientEvent.DecodedToken("{", "{")
-            ))
-            observer.onEvent(observerEvent(
-                SmsProcessingTransientEvent.DecodedToken(
-                    "\"decision\":\"none\"}",
-                    "{\"decision\":\"none\"}"
+            observer.onEvent(
+                observerEvent(
+                    SmsProcessingTransientEvent.InferenceStarted(model, true, 512)
                 )
-            ))
-            observer.onEvent(observerEvent(
-                SmsProcessingTransientEvent.InferenceCompleted(
-                    DirectCandidateSelectorResult(
-                        rawOutput = "{\"decision\":\"none\"}",
-                        completion = "complete",
-                        safeErrorCode = null,
-                        model = model,
-                        performance = SlmPerformanceData(1, 2, 100, 3),
-                        cache = SlmCacheDiagnostics()
+            )
+            observer.onEvent(
+                observerEvent(
+                    SmsProcessingTransientEvent.DecodedToken("{", "{")
+                )
+            )
+            observer.onEvent(
+                observerEvent(
+                    SmsProcessingTransientEvent.DecodedToken(
+                        "\"decision\":\"none\"}",
+                        "{\"decision\":\"none\"}"
                     )
                 )
-            ))
+            )
+            observer.onEvent(
+                observerEvent(
+                    SmsProcessingTransientEvent.InferenceCompleted(
+                        DirectCandidateSelectorResult(
+                            rawOutput = "{\"decision\":\"none\"}",
+                            completion = "complete",
+                            safeErrorCode = null,
+                            model = model,
+                            performance = SlmPerformanceData(1, 2, 100, 3),
+                            cache = SlmCacheDiagnostics()
+                        )
+                    )
+                )
+            )
             SmsProcessingOutcome.TerminallyDiscarded(
                 snapshot.operationId,
-                "valid_none"
+                "extractor_none"
             )
         }
         val events = mutableListOf<PipelineService.ProcessingEvent>()
@@ -351,15 +373,22 @@ class PipelineServiceTest {
     @Test
     fun `settled replay ignores changed settings across manual historical and realtime entrypoints`() = runTest {
         coEvery { store.admitForProcessing(any(), any()) } returns SmsProcessingAdmission.Existing(
-            operation().copy(state = "persisted", settledAt = 2,
-                settlementReceiptJson = "{\"transaction_ids\":[\"saved-id\"]}"), null
+            operation().copy(
+                state = "persisted",
+                settledAt = 2,
+                settlementReceiptJson = "{\"transaction_ids\":[\"saved-id\"]}"
+            ),
+            null
         )
         val enabled = MutableStateFlow(false)
         every { grammarPreferences.gbnfGrammarEnabled } returns enabled
         for (trigger in listOf("manual", "historical", "realtime")) {
             enabled.value = !enabled.value
-            val result = if (trigger == "realtime") pipeline.processSingle(message(), trigger = trigger) else
+            val result = if (trigger == "realtime") {
+                pipeline.processSingle(message(), trigger = trigger)
+            } else {
                 pipeline.processSingle(message(), lease, trigger = trigger)
+            }
             assertEquals(PipelineService.ProcessingResult.Saved(listOf("saved-id"), true), result)
         }
         assertNoNewExtraction()
@@ -371,20 +400,26 @@ class PipelineServiceTest {
     fun `busy and conflicting source identities never create snapshot or call coordinator`() = runTest {
         coEvery { store.admitForProcessing(any(), any()) } returns
             SmsProcessingAdmission.Busy(snapshot.operationId)
-        assertTrue(assertIs<PipelineService.ProcessingResult.Failure>(
-            pipeline.processSingle(message(), lease)
-        ).retryable)
+        assertTrue(
+            assertIs<PipelineService.ProcessingResult.Failure>(
+                pipeline.processSingle(message(), lease)
+            ).retryable
+        )
         coEvery { store.admitForProcessing(any(), any()) } returns SmsProcessingAdmission.Conflict
-        assertEquals(false, assertIs<PipelineService.ProcessingResult.Failure>(
-            pipeline.processSingle(message(), trigger = "realtime")
-        ).retryable)
+        assertEquals(
+            false,
+            assertIs<PipelineService.ProcessingResult.Failure>(
+                pipeline.processSingle(message(), trigger = "realtime")
+            ).retryable
+        )
         assertNoNewExtraction()
     }
 
     @Test
     fun `recovered ready and interrupted operations reuse their visible review without resnapshot`() = runTest {
         coEvery { store.admitForProcessing(any(), any()) } returns SmsProcessingAdmission.Existing(
-            operation().copy(state = "interrupted"), "existing-review"
+            operation().copy(state = "interrupted"),
+            "existing-review"
         )
         assertEquals(
             PipelineService.ProcessingResult.Skipped(PipelineService.SkipReason.RETAINED_FOR_REVIEW),
@@ -396,13 +431,21 @@ class PipelineServiceTest {
     @Test
     fun `none and owner rejected replay create no extraction or duplicate review`() = runTest {
         coEvery { store.admitForProcessing(any(), any()) } returnsMany listOf(
-            SmsProcessingAdmission.Existing(operation().copy(state = "discarded", settledAt = 2), null),
-            SmsProcessingAdmission.Existing(operation().copy(state = "retain_review", settledAt = 2),
-                "rejected-review", "rejected")
+            SmsProcessingAdmission.Existing(
+                operation().copy(state = "discarded", settledAt = 2),
+                null
+            ),
+            SmsProcessingAdmission.Existing(
+                operation().copy(state = "retain_review", settledAt = 2),
+                "rejected-review",
+                "rejected"
+            )
         )
         repeat(2) {
-            assertEquals(PipelineService.ProcessingResult.Skipped(PipelineService.SkipReason.NOT_TRANSACTION),
-                pipeline.processSingle(message()))
+            assertEquals(
+                PipelineService.ProcessingResult.Skipped(PipelineService.SkipReason.NOT_TRANSACTION),
+                pipeline.processSingle(message())
+            )
         }
         assertNoNewExtraction()
     }
@@ -411,18 +454,20 @@ class PipelineServiceTest {
     fun `owner confirmed transaction is reused without another model call`() = runTest {
         coEvery { store.admitForProcessing(any(), any()) } returns
             SmsProcessingAdmission.Saved(listOf("owner-confirmed-id"))
-        assertEquals(PipelineService.ProcessingResult.Saved(listOf("owner-confirmed-id"), true),
-            pipeline.processSingle(message()))
+        assertEquals(
+            PipelineService.ProcessingResult.Saved(listOf("owner-confirmed-id"), true),
+            pipeline.processSingle(message())
+        )
         assertNoNewExtraction()
     }
 
     @Test
-    fun `identical providerless content does not become reliable identity`() = runTest {
+    fun `identical providerless manual content does not become reliable identity`() = runTest {
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
-        coEvery { v5Coordinator.processAdmitted(any(), snapshot, any(), null, any()) } returns
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), null, any()) } returns
             SmsProcessingOutcome.RetainedForReview(snapshot.operationId, "review-id", emptyList())
         val sms = message().copy(providerMessageId = null)
-        repeat(2) { pipeline.processSingle(sms, trigger = "realtime") }
+        repeat(2) { pipeline.processSingle(sms, trigger = "manual") }
         assertEquals(2, admittedSources.map { it.id }.distinct().size)
         assertEquals(2, admittedSources.map { it.sourceMessageId }.distinct().size)
         assertEquals(1, admittedSources.map { it.sourceFingerprint }.distinct().size)
@@ -432,9 +477,11 @@ class PipelineServiceTest {
     @Test
     fun `explicit retry cannot steal active source processing`() = runTest {
         coEvery { store.retryContext("review-id") } throws SmsAdmissionBusyException()
-        assertTrue(assertIs<PipelineService.ProcessingResult.Failure>(
-            pipeline.retryReview("review-id", "current")
-        ).retryable)
+        assertTrue(
+            assertIs<PipelineService.ProcessingResult.Failure>(
+                pipeline.retryReview("review-id", "current")
+            ).retryable
+        )
         assertNoNewExtraction()
     }
 
@@ -442,19 +489,24 @@ class PipelineServiceTest {
     fun `explicit current settings retry passes preserved parent and event lineage`() = runTest {
         val source = source()
         val parent = operation(source.id).copy(
-            state = "retain_review", settledAt = 2,
-            configurationJson = """{"contract":"pocketfinancer.processing-config/6","currency_context":{"primary_currency":"INR","enabled_profile_ids":["core-en","india"]}}"""
+            state = "retain_review",
+            settledAt = 2,
+            configurationJson = """{"contract":"${SmsContractAssets.PROCESSING_CONFIG_CONTRACT}","currency_context":{"primary_currency":"INR","enabled_profile_ids":["core-en","india"]}}"""
         )
-        coEvery { store.retryContext("review-id") } returns SmsReviewRetryContext("review-id", source, parent)
+        coEvery { store.retryContext("review-id") } returns SmsReviewRetryContext(
+            "review-id",
+            source,
+            parent
+        )
         every { configuration.confirmedPrimaryCurrency() } returns "INR"
         every { grammarPreferences.gbnfGrammarEnabled } returns MutableStateFlow(true)
-        coEvery { v5Coordinator.process(any(), snapshot, any()) } returns
+        coEvery { coordinator.process(any(), snapshot, any()) } returns
             SmsProcessingOutcome.RetainedForReview(snapshot.operationId, "review-id", emptyList())
 
         pipeline.retryReview("review-id", "current")
 
         coVerify(exactly = 1) {
-            v5SnapshotFactory.create(
+            snapshotFactory.create(
                 any(), "retry", "INR", listOf("core-en", "india"), any(), any(), source.admittedAt,
                 any(), "llama.cpp-jni", any(), parent.stableEventId, parent.id, any(), true
             )
@@ -462,17 +514,36 @@ class PipelineServiceTest {
     }
 
     @Test
-    fun `original v2 retry passes its snapshot and preserved lineage to its coordinator`() = runTest {
+    fun `original consolidated retry decodes stored snapshot and executes with frozen fields`() = runTest {
         val source = source()
         val parent = operation(source.id).copy(
-            state = "retain_review", settledAt = 2,
-            configurationJson = """{"contract":"pocketfinancer.processing-config/2","currency_context":{"primary_currency":"INR","enabled_profile_ids":["core-en","india"]},"selector":{"model_identifier":"invented-selector","model_file_sha256":"${"a".repeat(64)}","runtime_version":"invented-runtime"}}"""
+            state = "retain_review",
+            settledAt = 2,
+            configurationJson = """{"contract":"${SmsContractAssets.PROCESSING_CONFIG_CONTRACT}"}"""
         )
+        val frozenSnapshot = snapshot().let {
+            it.copy(
+                configuration = it.configuration.copy(
+                    extractorEligible = false,
+                    extractorIneligibilityReason = "runtime_unavailable",
+                    modelIdentifier = null,
+                    modelFileSha256 = null,
+                    grammarEnabled = true
+                )
+            )
+        }
         val retrySnapshot = mockk<SmsOperationSnapshot>()
-        coEvery { store.retryContext("review-id") } returns SmsReviewRetryContext("review-id", source, parent)
+        coEvery { store.retryContext("review-id") } returns SmsReviewRetryContext(
+            "review-id",
+            source,
+            parent
+        )
+        every { snapshotFactory.decode(parent) } returns frozenSnapshot
         coEvery {
-            snapshotFactory.create(any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any())
+            snapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any()
+            )
         } returns retrySnapshot
         coEvery { coordinator.process(any(), retrySnapshot, any()) } returns
             SmsProcessingOutcome.RetainedForReview("retry-operation", "review-id", emptyList())
@@ -482,66 +553,103 @@ class PipelineServiceTest {
         assertIs<PipelineService.ProcessingResult.Skipped>(result)
         coVerify(exactly = 1) {
             snapshotFactory.create(
-                any(), "retry", "INR", listOf("core-en", "india"), source.sourceTimestamp,
-                "acquisition_supplied_message_time", source.admittedAt, "invented-selector",
-                "a".repeat(64), "invented-runtime", any(), parent.stableEventId, parent.id, any()
+                any(),
+                "retry",
+                "INR",
+                listOf("core-en", "india"),
+                frozenSnapshot.configuration.receivedTimestampEpochMs,
+                frozenSnapshot.configuration.receivedTimestampProvenance,
+                source.admittedAt,
+                SmsModelIdentity(false, null, null),
+                "llama.cpp-jni",
+                any(),
+                parent.stableEventId,
+                parent.id,
+                any(),
+                true
             )
         }
         coVerify(exactly = 1) { coordinator.process(any(), retrySnapshot, any()) }
-        assertNoNewExtraction()
+        coVerify(exactly = 0) { coordinator.processAdmitted(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { coordinator.currentModelIdentity() }
+        verify(exactly = 0) { coordinator.modelIdentityForLease(any()) }
     }
 
     @Test
-    fun `original v4 retry passes its snapshot and preserved lineage to its coordinator`() = runTest {
+    fun `original retry for retired historical config contracts fails closed cleanly`() = runTest {
         val source = source()
         val parent = operation(source.id).copy(
-            state = "retain_review", settledAt = 2,
-            configurationJson = """{"contract":"pocketfinancer.processing-config/4","currency_context":{"primary_currency":"INR","enabled_profile_ids":["core-en","india"]},"extractor":{"eligible":false,"model_identifier":null,"model_file_sha256":null},"received_timestamp":{"epoch_ms":1700000000000,"provenance":"acquisition_supplied_message_time"}}"""
+            state = "retain_review",
+            settledAt = 2,
+            contractReleaseId = "native-integration-v4",
+            configurationJson = """{"contract":"pocketfinancer.processing-config/4"}"""
         )
-        val retrySnapshot = mockk<SmsV4OperationSnapshot>()
-        coEvery { store.retryContext("review-id") } returns SmsReviewRetryContext("review-id", source, parent)
-        coEvery {
-            v4SnapshotFactory.create(any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any())
-        } returns retrySnapshot
-        coEvery { v4Coordinator.process(any(), retrySnapshot, any()) } returns
-            SmsProcessingOutcome.RetainedForReview("retry-operation", "review-id", emptyList())
+        coEvery { store.retryContext("review-id") } returns SmsReviewRetryContext(
+            "review-id",
+            source,
+            parent
+        )
 
-        val result = pipeline.retryReview("review-id", "original")
+        val result = assertIs<PipelineService.ProcessingResult.Failure>(
+            pipeline.retryReview("review-id", "original")
+        )
 
-        assertIs<PipelineService.ProcessingResult.Skipped>(result)
-        coVerify(exactly = 1) {
-            v4SnapshotFactory.create(
-                any(), "retry", "INR", listOf("core-en", "india"), 1_700_000_000_000L,
-                "acquisition_supplied_message_time", source.admittedAt, SmsV4ModelIdentity(false, null, null),
-                "llama.cpp-jni", any(), parent.stableEventId, parent.id, any()
-            )
-        }
-        coVerify(exactly = 1) { v4Coordinator.process(any(), retrySnapshot, any()) }
+        assertFalse(result.retryable)
         assertNoNewExtraction()
     }
 
     private fun assertNoNewExtraction() {
         coVerify(exactly = 0) {
-            v5SnapshotFactory.create(any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any())
+            snapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any()
+            )
         }
-        coVerify(exactly = 0) { v5Coordinator.processAdmitted(any(), any(), any(), any(), any()) }
-        verify(exactly = 0) { v5Coordinator.currentModelIdentity() }
-        verify(exactly = 0) { v5Coordinator.modelIdentityForLease(any()) }
+        coVerify(exactly = 0) { coordinator.processAdmitted(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { coordinator.currentModelIdentity() }
+        verify(exactly = 0) { coordinator.modelIdentityForLease(any()) }
     }
 
     private fun source(): AdmittedSmsSourceEntity {
         val sms = message()
         val identity = sms.sourceIdentity
-        return AdmittedSmsSourceEntity(identity.opaqueCandidateKey, identity.connector,
-            identity.messageId, identity.providerMessageId, identity.fallbackFingerprint, null,
-            sms.address, sms.body, sms.sourceTimestamp, sms.type, "manual", "receipt-id", sms.date, "admitted")
+        return AdmittedSmsSourceEntity(
+            identity.opaqueCandidateKey,
+            identity.connector,
+            identity.messageId,
+            identity.providerMessageId,
+            identity.fallbackFingerprint,
+            null,
+            sms.address,
+            sms.body,
+            sms.sourceTimestamp,
+            sms.type,
+            "manual",
+            "receipt-id",
+            sms.date,
+            "admitted"
+        )
     }
 
     private fun operation(sourceId: String = "synthetic-source") = SmsProcessingOperationEntity(
-        snapshot.operationId, sourceId, null, snapshot.stableEventId, "manual", "{}", "a".repeat(64),
-        "native-integration-v6", "ready", 0, null, 0, null, 1, 1, null, null, 0
+        snapshot.operationId,
+        sourceId,
+        null,
+        snapshot.stableEventId,
+        "manual",
+        "{}",
+        "a".repeat(64),
+        SmsContractAssets.RELEASE_ID,
+        "ready",
+        0,
+        null,
+        0,
+        null,
+        1,
+        1,
+        null,
+        null,
+        0
     )
 
     private fun observerEvent(
@@ -563,13 +671,13 @@ class PipelineServiceTest {
         providerMessageId = "synthetic-provider-id"
     )
 
-    private fun snapshot(): SmsV5OperationSnapshot {
+    private fun snapshot(): SmsOperationSnapshot {
         val operationId = "11111111-1111-4111-8111-111111111111"
-        return SmsV5OperationSnapshot(
+        return SmsOperationSnapshot(
             operationId = operationId,
             parentOperationId = null,
             stableEventId = "22222222-2222-4222-8222-222222222222",
-            configuration = SmsV5OperationConfiguration(
+            configuration = SmsOperationConfiguration(
                 operationId = operationId,
                 parentOperationId = null,
                 sourceId = "synthetic-source",
@@ -582,7 +690,7 @@ class PipelineServiceTest {
                 timezoneId = "UTC",
                 primaryCurrency = "INR",
                 enabledProfiles = listOf("core-en", "india"),
-                releaseManifestHash = "b".repeat(64),
+                releaseManifestHash = SmsContractAssets.MANIFEST_SHA256,
                 currencyAssetHash = "c".repeat(64),
                 profileAssetHashes = emptyMap(),
                 extractorEligible = true,
@@ -595,6 +703,7 @@ class PipelineServiceTest {
                 deviceCohort = "test-device",
                 promptHash = "d".repeat(64),
                 grammarHash = "e".repeat(64),
+                grammarEnabled = false,
                 validationProfileHash = "f".repeat(64),
                 rolloutMode = "automatic"
             ),

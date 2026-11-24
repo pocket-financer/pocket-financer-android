@@ -1,6 +1,5 @@
 package com.pocketfinancer.pipeline.sms
 
-import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -10,14 +9,7 @@ import org.json.JSONObject
 
 class SmsExtractorValidatorTest {
     @Test fun `passes every frozen sanitized extractor vector`() {
-        val root = listOf(
-            File("src/main/assets/sms_processing/native-integration-v4"),
-            File("pipeline/src/main/assets/sms_processing/native-integration-v4")
-        ).firstOrNull(File::isDirectory) ?: error("Native v4 bundle unavailable")
-        val vectors = JSONObject(
-            File(root, "tests/sms_processing/golden/extractor-v1/sanitized-vectors.json")
-                .readText()
-        ).getJSONArray("cases")
+        val vectors = JSONObject(SANITIZED_VECTORS_JSON).getJSONArray("cases")
         repeat(vectors.length()) { index ->
             val vector = vectors.getJSONObject(index)
             val expectedReason = vector.optString("expected_reason").takeIf { it.isNotBlank() }
@@ -162,5 +154,100 @@ class SmsExtractorValidatorTest {
             SmsExtractorNormalizer.normalize(parsed, "INR", listOf("core-en", "india"))
         }
         assertEquals("extractor_counterparty_invalid", error.reasonCode)
+    }
+
+    @Test fun `direction grounding supports expanded debit and credit terms`() {
+        val expandedDebit = listOf(
+            "sent", "txn", "transaction", "payment", "transfer", "transferred",
+            "purchase", "purchased", "autopaid", "without otp", "dr", "used"
+        )
+        expandedDebit.forEach { term ->
+            val sms = "INR 50.00 $term A/c XX1234"
+            val dirStart = "INR 50.00 ".length
+            val dirEnd = dirStart + term.length
+            val accStart = dirEnd + " A/c ".length
+            val raw = """{"decision":"posted","amount":{"value":"50.00","currency":"INR","evidence":{"start_scalar":0,"end_scalar":9,"text":"INR 50.00"}},"direction":{"value":"debit","evidence":{"start_scalar":$dirStart,"end_scalar":$dirEnd,"text":"$term"}},"account":{"reference":"XX1234","evidence":{"start_scalar":$accStart,"end_scalar":${accStart + 6},"text":"XX1234"}},"counterparty":null}"""
+            val normalized = SmsExtractorNormalizer.normalize(
+                assertIs<SmsExtractorResult.Posted>(SmsExtractorValidator.validate(raw, sms)),
+                primaryCurrency = "INR",
+                enabledProfiles = listOf("core-en", "india")
+            )
+            assertEquals("debit", normalized.direction, term)
+        }
+
+        val expandedCredit = listOf(
+            "deposit", "refund", "reversed", "reversal", "cr", "cashback", "adjusted"
+        )
+        expandedCredit.forEach { term ->
+            val sms = "INR 75.00 $term A/c XX4321"
+            val dirStart = "INR 75.00 ".length
+            val dirEnd = dirStart + term.length
+            val accStart = dirEnd + " A/c ".length
+            val raw = """{"decision":"posted","amount":{"value":"75.00","currency":"INR","evidence":{"start_scalar":0,"end_scalar":9,"text":"INR 75.00"}},"direction":{"value":"credit","evidence":{"start_scalar":$dirStart,"end_scalar":$dirEnd,"text":"$term"}},"account":{"reference":"XX4321","evidence":{"start_scalar":$accStart,"end_scalar":${accStart + 6},"text":"XX4321"}},"counterparty":null}"""
+            val normalized = SmsExtractorNormalizer.normalize(
+                assertIs<SmsExtractorResult.Posted>(SmsExtractorValidator.validate(raw, sms)),
+                primaryCurrency = "INR",
+                enabledProfiles = listOf("core-en", "india")
+            )
+            assertEquals("credit", normalized.direction, term)
+        }
+    }
+
+    private companion object {
+        const val SANITIZED_VECTORS_JSON = """
+        {
+          "span_coordinate_system": "zero-based-half-open-unicode-scalars",
+          "cases": [
+            {
+              "id": "unicode_emoji_zero_evidence",
+              "sms_body": "Alert \ud83d\udcb3: INR 1,250.00 debited from a/c XX1234 at Caf\u00e9.",
+              "model_output": {
+                "decision": "posted",
+                "amount": {"value": "1250.00", "currency": "INR", "evidence": {"start_scalar": 9, "end_scalar": 21, "text": "INR 1,250.00"}},
+                "direction": {"value": "debit", "evidence": {"start_scalar": 22, "end_scalar": 29, "text": "debited"}},
+                "account": {"reference": "XX1234", "evidence": {"start_scalar": 39, "end_scalar": 45, "text": "XX1234"}},
+                "counterparty": {"value": "Caf\u00e9", "evidence": {"start_scalar": 49, "end_scalar": 53, "text": "Caf\u00e9"}}
+              },
+              "expected": {"decision": "posted", "amount_minor_units": 125000, "amount_currency": "INR", "direction": "debit", "account_reference": "1234", "counterparty": "caf\u00e9"}
+            },
+            {
+              "id": "combining_mark_conflicting_advice",
+              "sms_body": "Cafe\u0301 INR 42.00 credited to account XX4321.",
+              "model_output": {
+                "decision": "posted",
+                "amount": {"value": "42.00", "currency": "INR", "evidence": {"start_scalar": 6, "end_scalar": 15, "text": "INR 42.00"}},
+                "direction": {"value": "credit", "evidence": {"start_scalar": 16, "end_scalar": 24, "text": "credited"}},
+                "account": {"reference": "XX4321", "evidence": {"start_scalar": 36, "end_scalar": 42, "text": "XX4321"}},
+                "counterparty": null
+              },
+              "expected": {"decision": "posted", "amount_minor_units": 4200, "amount_currency": "INR", "direction": "credit", "account_reference": "4321", "counterparty": null}
+            },
+            {
+              "id": "sanitized_negative",
+              "sms_body": "Your statement is ready to view in the app.",
+              "model_output": {"decision": "none"},
+              "expected": {"decision": "none"}
+            },
+            {
+              "id": "mandatory_account_missing",
+              "sms_body": "INR 75.00 was debited.",
+              "model_output": {"decision": "abstain"},
+              "expected": {"decision": "abstain"}
+            },
+            {
+              "id": "adversarial_mismatched_span",
+              "sms_body": "INR 1,250.00 debited from account XX9999.",
+              "model_output": {
+                "decision": "posted",
+                "amount": {"value": "1250.00", "currency": "INR", "evidence": {"start_scalar": 0, "end_scalar": 12, "text": "INR 1,250.00"}},
+                "direction": {"value": "debit", "evidence": {"start_scalar": 13, "end_scalar": 20, "text": "debited"}},
+                "account": {"reference": "XX0000", "evidence": {"start_scalar": 34, "end_scalar": 40, "text": "XX0000"}},
+                "counterparty": null
+              },
+              "expected_reason": "extractor_evidence_mismatch"
+            }
+          ]
+        }
+        """
     }
 }

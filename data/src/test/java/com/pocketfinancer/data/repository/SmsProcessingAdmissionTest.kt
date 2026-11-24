@@ -476,6 +476,170 @@ class SmsProcessingAdmissionTest {
         assertEquals(2, count("sms_processing_operations"))
     }
 
+    @Test
+    fun `body free tombstones clear body preserve digest reason timestamp and survive replay`() = runBlocking {
+        val otpSource = source("otp-provider").copy(
+            rawMessage = "Your OTP is 482910. Do not share.",
+            sourceAlternateFingerprint = null
+        )
+        val otpClaimed = admit(otpSource)
+        val expectedOtpDigest = SmsProcessingStore.sha256(otpSource.rawMessage)
+        val excludedAt = now()
+        store.settleDiscarded(
+            claim = otpClaimed.claim,
+            reason = "prefilter_otp_verification",
+            now = excludedAt,
+            retentionState = SmsProcessingStore.RETENTION_TOMBSTONED_EXCLUDED
+        )
+
+        val storedExcluded = database.smsProcessingDao().getSource(otpSource.id)!!
+        assertEquals("", storedExcluded.rawMessage)
+        assertEquals("", storedExcluded.sender)
+        assertEquals(SmsProcessingStore.RETENTION_TOMBSTONED_EXCLUDED, storedExcluded.retentionState)
+        assertEquals(otpSource.id, storedExcluded.id)
+        assertEquals(otpSource.admittedAt, storedExcluded.admittedAt)
+        val meta = org.json.JSONObject(storedExcluded.sourceAlternateFingerprint!!)
+        assertEquals(expectedOtpDigest, meta.getString("body_sha256"))
+        assertEquals("prefilter_otp_verification", meta.getString("reason"))
+        assertEquals(excludedAt, meta.getLong("tombstoned_at_epoch_ms"))
+
+        val replay = assertIs<SmsProcessingAdmission.Existing>(store.admitForProcessing(otpSource) {
+            error("Tombstoned replay must never start another operation")
+        })
+        assertEquals("discarded", replay.operation.state)
+
+        val promoSource = source("promo-provider").copy(rawMessage = "Enjoy 20% discount via card.")
+        val promoClaimed = admit(promoSource)
+        val expectedPromoDigest = SmsProcessingStore.sha256(promoSource.rawMessage)
+        val noneAt = excludedAt + 50
+        store.settleDiscarded(
+            claim = promoClaimed.claim,
+            reason = "extractor_none",
+            now = noneAt,
+            retentionState = SmsProcessingStore.RETENTION_TOMBSTONED_NONE
+        )
+        val storedNone = database.smsProcessingDao().getSource(promoSource.id)!!
+        assertEquals("", storedNone.rawMessage)
+        assertEquals(SmsProcessingStore.RETENTION_TOMBSTONED_NONE, storedNone.retentionState)
+        val noneMeta = org.json.JSONObject(storedNone.sourceAlternateFingerprint!!)
+        assertEquals(expectedPromoDigest, noneMeta.getString("body_sha256"))
+        assertEquals("extractor_none", noneMeta.getString("reason"))
+        assertEquals(noneAt, noneMeta.getLong("tombstoned_at_epoch_ms"))
+    }
+
+    @Test
+    fun `5 minute duplicate window matches identical account direction amount currency and excludes reversals or other accounts`() = runBlocking {
+        val baseTime = 1_700_000_000_000L
+        val first = admit(source("p1"))
+        database.accountDao().insert(
+            com.pocketfinancer.data.db.entity.AccountEntity("acct-1", "A/c XX1234", "Bank A", "manual")
+        )
+        database.accountDao().insert(
+            com.pocketfinancer.data.db.entity.AccountEntity("acct-2", "A/c XX9999", "Bank B", "manual")
+        )
+        database.transactionDao().insert(
+            TransactionEntity(
+                id = "tx-1",
+                amount = 245.0,
+                merchant = "DEMO CAFE",
+                date = baseTime,
+                type = "debit",
+                accountId = "acct-1",
+                rawMessage = first.source.rawMessage,
+                sender = "SYNTH",
+                sourceConnector = first.source.sourceConnector,
+                sourceMessageId = first.source.sourceMessageId,
+                sourceProviderMessageId = first.source.sourceProviderMessageId,
+                sourceFingerprint = first.source.sourceFingerprint,
+                sourceId = first.source.id,
+                sourceEventId = first.operation.stableEventId,
+                exactMinorUnits = 24_500L,
+                currencyCode = "INR",
+                currencyScale = 2
+            )
+        )
+
+        // Same sourceId excluded cleanly
+        assertEquals(
+            0,
+            store.duplicateMatchCounts(
+                operationId = first.operation.id,
+                sourceId = first.source.id,
+                stableEventId = first.operation.stableEventId,
+                transactionFingerprint = "a".repeat(64),
+                accountId = "acct-1",
+                direction = "debit",
+                minorUnits = 24_500L,
+                currency = "INR",
+                occurredAtEpochMs = baseTime + 60_000L
+            ).windowDuplicateMatches
+        )
+
+        // Different source within 300_000 ms -> matches
+        assertEquals(
+            1,
+            store.duplicateMatchCounts(
+                operationId = "other-op",
+                sourceId = "other-source",
+                stableEventId = "other-event",
+                transactionFingerprint = "b".repeat(64),
+                accountId = "acct-1",
+                direction = "debit",
+                minorUnits = 24_500L,
+                currency = "INR",
+                occurredAtEpochMs = baseTime + 300_000L
+            ).windowDuplicateMatches
+        )
+
+        // Outside 300_000 ms (+300_001) -> clear
+        assertEquals(
+            0,
+            store.duplicateMatchCounts(
+                operationId = "other-op",
+                sourceId = "other-source",
+                stableEventId = "other-event",
+                transactionFingerprint = "b".repeat(64),
+                accountId = "acct-1",
+                direction = "debit",
+                minorUnits = 24_500L,
+                currency = "INR",
+                occurredAtEpochMs = baseTime + 300_001L
+            ).windowDuplicateMatches
+        )
+
+        // Opposite-direction reversal on same account/amount -> must NOT collide
+        assertEquals(
+            0,
+            store.duplicateMatchCounts(
+                operationId = "other-op",
+                sourceId = "other-source",
+                stableEventId = "other-event",
+                transactionFingerprint = "b".repeat(64),
+                accountId = "acct-1",
+                direction = "credit",
+                minorUnits = 24_500L,
+                currency = "INR",
+                occurredAtEpochMs = baseTime + 10_000L
+            ).windowDuplicateMatches
+        )
+
+        // Different account transfer -> must NOT collide
+        assertEquals(
+            0,
+            store.duplicateMatchCounts(
+                operationId = "other-op",
+                sourceId = "other-source",
+                stableEventId = "other-event",
+                transactionFingerprint = "b".repeat(64),
+                accountId = "acct-2",
+                direction = "debit",
+                minorUnits = 24_500L,
+                currency = "INR",
+                occurredAtEpochMs = baseTime + 10_000L
+            ).windowDuplicateMatches
+        )
+    }
+
     private fun ledgerTransaction(source: AdmittedSmsSourceEntity) = TransactionEntity(
         id = "invented-legacy-transaction", amount = 10.0, merchant = "Invented shop", date = SOURCE_TIME,
         type = "debit", accountId = "invented-account", rawMessage = source.rawMessage,

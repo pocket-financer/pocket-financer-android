@@ -1,2 +1,3 @@
 # Frozen SMS contracts are byte-hashed at runtime. Preserve release bytes on Windows.
 pipeline/src/main/assets/sms_processing/** text eol=lf
+pipeline/src/test/resources/** text eol=lf

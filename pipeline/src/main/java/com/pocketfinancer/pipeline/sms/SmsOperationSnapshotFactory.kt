@@ -3,6 +3,7 @@ package com.pocketfinancer.pipeline.sms
 import android.content.Context
 import android.os.Build
 import com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity
+import com.pocketfinancer.data.repository.SmsOperationClaim
 import com.pocketfinancer.data.repository.SmsProcessingStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.TimeZone
@@ -12,76 +13,128 @@ import javax.inject.Singleton
 import org.json.JSONArray
 import org.json.JSONObject
 
+data class SmsOperationConfiguration(
+    val contract: String = SmsContractAssets.PROCESSING_CONFIG_CONTRACT,
+    val releaseId: String = SmsContractAssets.RELEASE_ID,
+    val operationId: String,
+    val parentOperationId: String?,
+    val sourceId: String,
+    val sourceRefHash: String,
+    val trigger: String,
+    val createdAtEpochMs: Long,
+    val admissionTimestampEpochMs: Long,
+    val receivedTimestampEpochMs: Long,
+    val receivedTimestampProvenance: String,
+    val timezoneId: String,
+    val primaryCurrency: String,
+    val enabledProfiles: List<String>,
+    val releaseManifestHash: String,
+    val currencyAssetHash: String,
+    val profileAssetHashes: Map<String, String>,
+    val extractorEligible: Boolean,
+    val extractorIneligibilityReason: String?,
+    val modelIdentifier: String?,
+    val modelFileSha256: String?,
+    val modelIdentityKind: String,
+    val runtimeVersion: String,
+    val osVersion: String,
+    val deviceCohort: String,
+    val promptHash: String,
+    val grammarHash: String,
+    val grammarEnabled: Boolean = false,
+    val validationProfileHash: String,
+    val wireTransport: String = "direct_json",
+    val rolloutMode: String = "automatic"
+)
+
+data class SmsOperationSnapshot(
+    val operationId: String,
+    val parentOperationId: String?,
+    val stableEventId: String,
+    val configuration: SmsOperationConfiguration,
+    val configurationJson: String,
+    val configurationHash: String,
+    val admissionClaim: SmsOperationClaim? = null
+)
+
 @Singleton
 class SmsOperationSnapshotFactory @Inject constructor(
     @ApplicationContext private val context: Context,
     private val store: SmsProcessingStore
 ) {
+    private val contractBinding by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        SmsContractAssets.verify(context.assets)
+    }
+
     suspend fun create(
         source: AdmittedMessageRef,
         trigger: String,
         primaryCurrency: String,
         enabledProfiles: List<String>,
-        sourceTimestampEpochMs: Long?,
-        sourceTimestampProvenance: String,
+        receivedTimestampEpochMs: Long,
+        receivedTimestampProvenance: String,
         admissionTimestampEpochMs: Long,
-        selectorModelId: String?,
-        selectorModelHash: String?,
-        selectorRuntimeVersion: String,
+        modelIdentity: SmsModelIdentity,
+        runtimeVersion: String,
         deviceCohort: String,
         stableEventId: String? = null,
         parentOperationId: String? = null,
-        now: Long = System.currentTimeMillis()
+        now: Long = System.currentTimeMillis(),
+        grammarEnabled: Boolean = false
     ): SmsOperationSnapshot {
         require(trigger in TRIGGERS)
         require(primaryCurrency in CurrencyProfileRegistry.scales)
-        require(enabledProfiles.isNotEmpty() && enabledProfiles.distinct().size == enabledProfiles.size)
-        require((sourceTimestampEpochMs == null) == (sourceTimestampProvenance == "unknown"))
+        require(
+            enabledProfiles.isNotEmpty() &&
+                enabledProfiles.distinct().size == enabledProfiles.size
+        )
+        require(receivedTimestampEpochMs >= 0L)
+        require(receivedTimestampProvenance in RECEIVED_PROVENANCE)
+        require(admissionTimestampEpochMs >= 0L && now >= admissionTimestampEpochMs)
+        require(trigger != "retry" || parentOperationId != null)
         val operationId = UUID.randomUUID().toString()
+        require(parentOperationId == null || parentOperationId != operationId)
         val resolvedStableEventId = stableEventId ?: UUID.randomUUID().toString()
         require(
-            UUID.fromString(resolvedStableEventId).toString() ==
-                resolvedStableEventId.lowercase()
+            UUID.fromString(resolvedStableEventId).toString() == resolvedStableEventId.lowercase()
         )
-        val manifestHash = assetHash("sms_processing/manifest.json")
-        val currencyHash = checkedAssetHash(
-            "sms_processing/currency-v1.json",
-            CURRENCY_HASH
-        )
-        val promptHash = checkedAssetHash(
-            "sms_processing/selector-prompt-v1.txt",
-            PROMPT_HASH
-        )
-        val eligible = selectorModelId != null
+
+        val binding = contractBinding
         val profileHashes = enabledProfiles.associateWith { profile ->
-            val expected = PROFILE_HASHES[profile]
-                ?: error("Unsupported SMS analyzer profile")
-            checkedAssetHash("sms_processing/profile-$profile-v1.json", expected)
+            binding.sha256ForPath("profiles/$profile.json")
         }
         val configuration = SmsOperationConfiguration(
+            contract = SmsContractAssets.PROCESSING_CONFIG_CONTRACT,
+            releaseId = binding.releaseId,
             operationId = operationId,
             parentOperationId = parentOperationId,
             sourceId = source.sourceId,
             sourceRefHash = SmsProcessingStore.sha256(source.sourceId),
             trigger = trigger,
             createdAtEpochMs = now,
+            admissionTimestampEpochMs = admissionTimestampEpochMs,
+            receivedTimestampEpochMs = receivedTimestampEpochMs,
+            receivedTimestampProvenance = receivedTimestampProvenance,
+            timezoneId = TimeZone.getDefault().id,
             primaryCurrency = primaryCurrency,
             enabledProfiles = enabledProfiles,
-            sourceTimestampEpochMs = sourceTimestampEpochMs,
-            sourceTimestampProvenance = sourceTimestampProvenance,
-            admissionTimestampEpochMs = admissionTimestampEpochMs,
-            timezoneId = TimeZone.getDefault().id,
-            releaseManifestHash = manifestHash,
-            currencyAssetHash = currencyHash,
+            releaseManifestHash = binding.manifestSha256,
+            currencyAssetHash = binding.sha256ForPath(SmsContractAssets.CURRENCY_PROFILE_PATH),
             profileAssetHashes = profileHashes,
-            selectorEligible = eligible,
-            selectorIneligibilityReason = if (eligible) null else "runtime_unavailable",
-            selectorModelId = selectorModelId ?: "unavailable",
-            selectorModelHash = selectorModelHash,
-            selectorRuntimeVersion = selectorRuntimeVersion,
-            osVersion = Build.VERSION.RELEASE,
+            extractorEligible = modelIdentity.eligible,
+            extractorIneligibilityReason =
+                if (modelIdentity.eligible) null else "runtime_unavailable",
+            modelIdentifier = modelIdentity.modelIdentifier,
+            modelFileSha256 = modelIdentity.modelFileSha256,
+            modelIdentityKind = modelIdentity.kind,
+            runtimeVersion = runtimeVersion,
+            osVersion = Build.VERSION.RELEASE.orEmpty().ifBlank { "unknown" },
             deviceCohort = deviceCohort,
-            promptHash = promptHash
+            promptHash = binding.sha256ForPath(SmsContractAssets.PROMPT_PATH),
+            grammarHash = binding.sha256ForPath(SmsContractAssets.GRAMMAR_PATH),
+            grammarEnabled = grammarEnabled,
+            validationProfileHash =
+                binding.sha256ForPath(SmsContractAssets.EXTRACTOR_VALIDATION_PROFILE_PATH)
         )
         val payload = payload(configuration)
         val configurationHash = SmsProcessingStore.sha256(CanonicalAndroidJson.stringify(payload))
@@ -114,24 +167,118 @@ class SmsOperationSnapshotFactory @Inject constructor(
             null
         }
         return SmsOperationSnapshot(
-            operationId,
-            parentOperationId,
-            resolvedStableEventId,
-            configuration,
-            configurationJson,
-            configurationHash,
-            admissionClaim
+            operationId = operationId,
+            parentOperationId = parentOperationId,
+            stableEventId = resolvedStableEventId,
+            configuration = configuration,
+            configurationJson = configurationJson,
+            configurationHash = configurationHash,
+            admissionClaim = admissionClaim
         )
     }
 
-    internal fun configurationMatches(snapshot: SmsOperationSnapshot): Boolean = runCatching {
-        val expectedPayload = payload(snapshot.configuration)
-        val expectedHash = SmsProcessingStore.sha256(
-            CanonicalAndroidJson.stringify(expectedPayload)
+    /**
+     * Decodes a persisted frozen operation entity (such as a stored `ready` snapshot during
+     * startup recovery or original-configuration inspection) and verifies its canonical hash.
+     */
+    fun decode(entity: SmsProcessingOperationEntity): SmsOperationSnapshot? = runCatching {
+        if (entity.contractReleaseId != SmsContractAssets.RELEASE_ID) return@runCatching null
+        val json = JSONObject(entity.configurationJson)
+        if (json.optString("config_hash") != entity.configurationHash) return@runCatching null
+        if (json.optString("contract") != SmsContractAssets.PROCESSING_CONFIG_CONTRACT) {
+            return@runCatching null
+        }
+
+        val release = json.getJSONObject("contract_release")
+        val releaseId = release.getString("release_id")
+        if (releaseId != SmsContractAssets.RELEASE_ID) return@runCatching null
+
+        val operationId = json.getString("operation_id")
+        if (operationId != entity.id) return@runCatching null
+        val parentOperationId = json.optString("parent_operation_id")
+            .takeIf { !json.isNull("parent_operation_id") && it.isNotBlank() }
+        if (parentOperationId != entity.parentOperationId) return@runCatching null
+        val sourceRefHash = json.getString("source_ref_hash")
+        if (sourceRefHash != SmsProcessingStore.sha256(entity.sourceId)) return@runCatching null
+
+        val analyzer = json.getJSONObject("analyzer")
+        val profileAssetsJson = analyzer.getJSONArray("profile_assets")
+        val profileHashes = linkedMapOf<String, String>()
+        for (i in 0 until profileAssetsJson.length()) {
+            val item = profileAssetsJson.getJSONObject(i)
+            profileHashes[item.getString("asset_id")] = item.getString("sha256")
+        }
+
+        val currencyContext = json.getJSONObject("currency_context")
+        val enabledProfilesJson = currencyContext.getJSONArray("enabled_profile_ids")
+        val enabledProfiles = (0 until enabledProfilesJson.length()).map {
+            enabledProfilesJson.getString(it)
+        }
+
+        val received = json.getJSONObject("received_timestamp")
+        val extractor = json.getJSONObject("extractor")
+        val persistencePolicy = json.getJSONObject("persistence_policy")
+        if (
+            persistencePolicy.optString("version") !=
+            SmsContractAssets.PERSISTENCE_POLICY_CONTRACT
+        ) {
+            return@runCatching null
+        }
+
+        val configuration = SmsOperationConfiguration(
+            contract = json.getString("contract"),
+            releaseId = releaseId,
+            operationId = operationId,
+            parentOperationId = parentOperationId,
+            sourceId = entity.sourceId,
+            sourceRefHash = sourceRefHash,
+            trigger = json.getString("trigger"),
+            createdAtEpochMs = json.getLong("created_at_epoch_ms"),
+            admissionTimestampEpochMs = json.getLong("admission_epoch_ms"),
+            receivedTimestampEpochMs = received.getLong("epoch_ms"),
+            receivedTimestampProvenance = received.getString("provenance"),
+            timezoneId = received.getString("timezone_id"),
+            primaryCurrency = currencyContext.getString("primary_currency"),
+            enabledProfiles = enabledProfiles,
+            releaseManifestHash = release.getString("manifest_sha256"),
+            currencyAssetHash = analyzer.getString("currency_asset_sha256"),
+            profileAssetHashes = profileHashes,
+            extractorEligible = extractor.getBoolean("eligible"),
+            extractorIneligibilityReason = extractor.optString("ineligibility_reason")
+                .takeIf { !extractor.isNull("ineligibility_reason") && it.isNotBlank() },
+            modelIdentifier = extractor.optString("model_identifier")
+                .takeIf { !extractor.isNull("model_identifier") && it.isNotBlank() },
+            modelFileSha256 = extractor.optString("model_file_sha256")
+                .takeIf { !extractor.isNull("model_file_sha256") && it.isNotBlank() },
+            modelIdentityKind = extractor.getString("model_identity_kind"),
+            runtimeVersion = extractor.getString("runtime_version"),
+            osVersion = extractor.getString("os_version"),
+            deviceCohort = extractor.getString("device_cohort"),
+            promptHash = extractor.getString("prompt_sha256"),
+            grammarHash = extractor.getString("grammar_sha256"),
+            grammarEnabled = extractor.getBoolean("grammar_enabled"),
+            validationProfileHash = extractor.getString("validation_profile_sha256"),
+            wireTransport = extractor.getString("wire_transport"),
+            rolloutMode = persistencePolicy.getString("rollout_mode")
         )
-        if (expectedHash != snapshot.configurationHash) return@runCatching false
-        expectedPayload.put("config_hash", expectedHash)
-        CanonicalAndroidJson.stringify(expectedPayload) == snapshot.configurationJson
+        val snapshot = SmsOperationSnapshot(
+            operationId = entity.id,
+            parentOperationId = entity.parentOperationId,
+            stableEventId = entity.stableEventId,
+            configuration = configuration,
+            configurationJson = entity.configurationJson,
+            configurationHash = entity.configurationHash,
+            admissionClaim = null
+        )
+        snapshot.takeIf(::configurationMatches)
+    }.getOrNull()
+
+    internal fun configurationMatches(snapshot: SmsOperationSnapshot): Boolean = runCatching {
+        val expected = payload(snapshot.configuration)
+        val hash = SmsProcessingStore.sha256(CanonicalAndroidJson.stringify(expected))
+        if (hash != snapshot.configurationHash) return@runCatching false
+        expected.put("config_hash", hash)
+        CanonicalAndroidJson.stringify(expected) == snapshot.configurationJson
     }.getOrDefault(false)
 
     private fun payload(value: SmsOperationConfiguration): JSONObject = JSONObject()
@@ -158,8 +305,7 @@ class SmsOperationSnapshotFactory @Inject constructor(
                     "profile_assets",
                     JSONArray(
                         value.enabledProfiles.map { profile ->
-                            JSONObject()
-                                .put("asset_id", profile)
+                            JSONObject().put("asset_id", profile)
                                 .put("sha256", value.profileAssetHashes.getValue(profile))
                         }
                     )
@@ -172,58 +318,55 @@ class SmsOperationSnapshotFactory @Inject constructor(
                 .put("enabled_profile_ids", JSONArray(value.enabledProfiles))
         )
         .put(
-            "source_timestamp",
+            "received_timestamp",
             JSONObject()
-                .put("epoch_ms", value.sourceTimestampEpochMs ?: JSONObject.NULL)
-                .put("provenance", value.sourceTimestampProvenance)
+                .put("epoch_ms", value.receivedTimestampEpochMs)
+                .put("provenance", value.receivedTimestampProvenance)
                 .put("timezone_id", value.timezoneId)
-                .put("policy_version", "pocketfinancer.timestamp-policy/1")
+                .put("read_only", true)
         )
         .put(
-            "selector",
+            "extractor",
             JSONObject()
-                .put("eligible", value.selectorEligible)
-                .put("ineligibility_reason", value.selectorIneligibilityReason ?: JSONObject.NULL)
-                .put("model_identifier", if (value.selectorEligible) value.selectorModelId else JSONObject.NULL)
-                .put("model_file_sha256", value.selectorModelHash ?: JSONObject.NULL)
-                .put("runtime_version", value.selectorRuntimeVersion)
+                .put("eligible", value.extractorEligible)
+                .put(
+                    "ineligibility_reason",
+                    value.extractorIneligibilityReason ?: JSONObject.NULL
+                )
+                .put("model_identifier", value.modelIdentifier ?: JSONObject.NULL)
+                .put("model_file_sha256", value.modelFileSha256 ?: JSONObject.NULL)
+                .put("model_identity_kind", value.modelIdentityKind)
+                .put("runtime_version", value.runtimeVersion)
                 .put("os_version", value.osVersion)
                 .put("device_cohort", value.deviceCohort)
-                .put("prompt_version", "pocketfinancer.selector-prompt/1")
                 .put("prompt_sha256", value.promptHash)
-                .put("validation_profile", "pocketfinancer.selector-validation-profile/3")
-                .put("generation_mode", value.generationMode)
-                .put("decoding", value.decoding)
-                .put("answer_token_limit", value.answerTokenLimit)
-                .put("raw_output_utf8_byte_limit", value.rawOutputByteLimit)
-                .put("parser_deadline_ms", value.parserDeadlineMs)
+                .put("grammar_sha256", value.grammarHash)
+                .put("grammar_enabled", value.grammarEnabled)
+                .put("validation_profile_sha256", value.validationProfileHash)
+                .put("prompt_version", "pocketfinancer.extractor-prompt/1")
+                .put("validation_profile", "pocketfinancer.extractor-validation-profile/1")
+                .put("grammar_version", "pocketfinancer.extractor-grammar/1")
+                .put("generation_mode", "DIRECT_NON_THINKING")
+                .put("decoding", "greedy")
+                .put("answer_token_limit", 512)
+                .put("raw_output_utf8_byte_limit", 16_384)
+                .put("parser_deadline_ms", 0)
+                .put("wire_transport", value.wireTransport)
         )
         .put(
             "persistence_policy",
             JSONObject()
-                .put("version", "pocketfinancer.persistence-policy/1")
+                .put("version", SmsContractAssets.PERSISTENCE_POLICY_CONTRACT)
                 .put("rollout_mode", value.rolloutMode)
         )
-
-    private fun assetHash(path: String): String = context.assets.open(path)
-        .bufferedReader(Charsets.UTF_8)
-        .use { SmsProcessingStore.sha256(it.readText()) }
-
-    private fun checkedAssetHash(path: String, expected: String): String =
-        assetHash(path).also { actual ->
-            check(actual == expected) { "Pinned SMS processing asset hash mismatch" }
-        }
 
     private companion object {
         val TRIGGERS = setOf(
             "realtime", "historical", "manual", "retry", "diagnostic", "app_intent",
             "background_recovery"
         )
-        const val CURRENCY_HASH = "cb5d991a5ade283f6b2406e4427a2fd1bf5468f67ab6f573f6eb97b4c5919c78"
-        const val PROMPT_HASH = "3da47ec16b074ddcf2c03526dd968f9f1f668f9bfbed69bc01c4e2b5c613b940"
-        val PROFILE_HASHES = mapOf(
-            "core-en" to "c9f7b95ce70528d4b564458e320a8788fdf2076ffb55d1d80e80687c48d48b52",
-            "india" to "1cb1a4d7431bb9fe141aa90d45bb3820a115942123668eb4efd6522a73ed0156"
+        val RECEIVED_PROVENANCE = setOf(
+            "platform_received", "acquisition_supplied_message_time"
         )
     }
 }
@@ -232,10 +375,14 @@ internal object CanonicalAndroidJson {
     fun stringify(value: Any?): String = when (value) {
         null, JSONObject.NULL -> "null"
         is JSONObject -> value.keys().asSequence().toList().sorted().joinToString(
-            prefix = "{", postfix = "}", separator = ","
+            prefix = "{",
+            postfix = "}",
+            separator = ","
         ) { key -> "${JSONObject.quote(key)}:${stringify(value.get(key))}" }
         is JSONArray -> (0 until value.length()).joinToString(
-            prefix = "[", postfix = "]", separator = ","
+            prefix = "[",
+            postfix = "]",
+            separator = ","
         ) { stringify(value.get(it)) }
         is String -> JSONObject.quote(value)
         is Boolean, is Int, is Long -> value.toString()

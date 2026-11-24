@@ -21,7 +21,7 @@ import com.pocketfinancer.ui.home.manualSyncPreDispatchRejectionMessage
 import com.pocketfinancer.ui.home.manualSyncPresentationState
 import com.pocketfinancer.ui.home.sanitizedManualSyncState
 import com.pocketfinancer.ui.home.showManualSyncStopRejectionFeedback
-import com.pocketfinancer.pipeline.SmsFilterPipeline
+import com.pocketfinancer.pipeline.sms.SmsPrefilter
 import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.SlmAppFlowCoordinator
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -63,7 +63,6 @@ class TransactionsViewModel @Inject constructor(
     private val transactionRepository: TransactionRepository,
     private val accountRepository: AccountRepository,
     private val syncManager: HomeSyncManager,
-    private val smsFilterPipeline: SmsFilterPipeline,
     private val appFlowCoordinator: SlmAppFlowCoordinator,
     private val smsReviewRepository: SmsReviewRepository
 ) : ViewModel() {
@@ -276,7 +275,11 @@ class TransactionsViewModel @Inject constructor(
         if (!item.hasDiagnosticSourceEvidence()) {
             return listOf(SOURCE_EVIDENCE_UNAVAILABLE)
         }
-        return smsFilterPipeline.filterWithDetails(item.sender, item.body).logs
+        val result = SmsPrefilter.evaluate(item.body)
+        return listOf(
+            "Policy: ${SmsPrefilter.POLICY_ID}",
+            "Decision: ${result.decision.wireValue} (${result.traceReasonCode})"
+        )
     }
 
     fun getKvCacheLogs(item: SyncSmsItem): List<String> {

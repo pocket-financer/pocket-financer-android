@@ -159,11 +159,18 @@ object SmsExtractorNormalizer {
 
     private fun directionGrounded(direction: String, text: String): Boolean {
         val terms = when (direction) {
-            "debit" -> listOf("debit", "debited", "deducted", "withdrawn", "spent", "paid", "charged")
-            "credit" -> listOf("credit", "credited", "deposited", "received", "refunded")
+            "debit" -> listOf(
+                "debit", "debited", "deducted", "withdrawn", "spent", "paid", "charged",
+                "sent", "txn", "transaction", "payment", "transfer", "transferred",
+                "purchase", "purchased", "autopaid", "without otp", "dr", "used"
+            )
+            "credit" -> listOf(
+                "credit", "credited", "deposited", "deposit", "received",
+                "refunded", "refund", "reversed", "reversal", "cr", "cashback", "adjusted"
+            )
             else -> return false
         }
-        val normalized = Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase(Locale.ROOT)
+        val normalized = frozenCaseFold(Normalizer.normalize(text, Normalizer.Form.NFKC))
         return terms.any { Regex("\\b${Regex.escape(it)}\\b").containsMatchIn(normalized) }
     }
 

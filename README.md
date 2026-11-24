@@ -38,13 +38,15 @@ By leveraging a local **Small Language Model (SLM)** backed by `llama.cpp` via a
 ```mermaid
 flowchart LR
     A["SMS + receipt/config"] --> B["Encrypted durable operation"]
-    B --> C["Advisory deterministic analysis"]
+    B --> P["Deterministic SmsPrefilter"]
+    P -->|"excluded"| X["Body-free tombstone"]
+    P -->|"eligible"| C["Advisory structural analysis"]
     C --> D["One local SLM classification/extraction"]
     D --> E["Strict parse + Unicode-scalar grounding"]
-    E --> F["Exact money + account + duplicate checks"]
-    F --> G["Versioned routing"]
-    G -->|"current v4 review-only"| H["Review"]
-    G -.->|"planned successor: complete valid"| I["Transactions"]
+    E -->|"valid none"| N["Body-free tombstone"]
+    E -->|"posted"| F["Exact money + account + 5-min duplicate checks"]
+    F -->|"complete valid"| I["Transactions"]
+    F -->|"exception / possible duplicate"| H["Review"]
 ```
 
 ---
@@ -56,7 +58,7 @@ Pocket Financer is structured into specialized, decoupled Gradle modules to ensu
 ```
 pocket-financer-android/
 ├── :app          # Jetpack Compose UI (Material 3 Dark Theme) + Hilt Dependency Injection Root
-├── :pipeline     # Pipeline Coordinator (orchestrates SMS parsing flows, Prompt building, & DB persistence)
+├── :pipeline     # Pipeline Coordinator (grounded SMS pipeline, SmsPrefilter, & DB persistence)
 ├── :inference    # llama.cpp JNI Engine, NDK compiled Native C++ library, HuggingFace model downloader
 ├── :data         # Encrypted Database (Room + SQLCipher integration, DAOs, Entities, and Repositories)
 ├── :sms          # Real-time BroadcastReceiver + Inbox ContentProvider Scraper
@@ -74,21 +76,24 @@ pocket-financer-android/
 
 ---
 
-## 🧠 Shared direct-extractor pipeline
+## 🧠 Shared direct-extractor pipeline (`pocketfinancer.sms-pipeline/1`)
 
 1. **Preserve evidence and configuration:** create a durable operation with the
    unchanged SMS, receipt time, release, currency, and real model-file identity.
-2. **Collect advisory evidence:** deterministic analysis records useful cues and
+2. **Pre-filter unambiguously non-transactional alerts (`sms-prefilter/1`):**
+   empty, no-digit, OTP, collect/mandate, telecom, gaming, brokerage EOD, and
+   no-financial-cue alerts settle immediately as body-free `tombstoned_excluded`
+   records before invoking the SLM.
+3. **Collect advisory evidence:** deterministic analysis records useful cues and
    spans but does not decide the semantic result.
-3. **Run one direct SLM extraction:** the model returns only `none`, `abstain`,
+4. **Run one direct SLM extraction:** the model returns only `none`, `abstain`,
    or one posted event with amount, direction, account, optional counterparty, and
    exact Unicode-scalar spans.
-4. **Validate deterministically:** the host rejects malformed JSON, bad spans,
-   inexact money, unresolved accounts, duplicate conflicts, and incompatible
-   provenance.
-5. **Route by version:** frozen v4 retains every posted result for review. A
-   successor contract will send complete valid results to Transactions and reserve
-   Review for exceptions.
+5. **Validate & route automatically:** the host rejects malformed JSON, bad spans,
+   and invalid money, settles valid `none` as body-free `tombstoned_none`, checks
+   account resolution and the 5-minute duplicate window (`300_000` ms), persists
+   complete clear transactions atomically to `Transactions`, and routes
+   exceptions/possible duplicates to `Review`.
 
 ---
 
@@ -100,7 +105,7 @@ To make local inference responsive and preserve battery life, Pocket Financer im
 *   **Auto-Thread Tuning**: Rather than hardcoded limits, the engine configures thread counts dynamically by passing `0` to let `llama.cpp`'s native C++ scheduler determine the thread count. This defaults to `std::min(cores, 4)` (optimizing octa-core CPUs with 4 threads, which fully engages performance cores without thrashing cores or causing thermal build-up).
 *   **Static Prefix Caching**: The static prompt prefix (~1,800 tokens of system prompt + few-shot examples) is prefilled once, and the native JNI engine serializes the resulting KV cache to disk as `session_<sha256>.bin` inside the secure app storage.
 *   **Instant Load**: On subsequent inference runs, the pre-saved session is loaded from disk in under `100ms`, completely bypassing the heavy prefill phase.
-*   **Automatic Cache Invalidation**: The session file name matches the SHA-256 hash of the static prefix. Any modifications to `system_prompt.txt` or `few_shot_examples.json` will automatically trigger a new prefill run on the next execution.
+*   **Automatic Cache Invalidation**: The session file name matches the SHA-256 hash of the static prefix. Any modifications to `prompts/sms-extractor.txt` will automatically trigger a new prefill run on the next execution.
 *   **Stale Cache Deletion**: To prevent disk clutter, whenever a new session file is generated, the engine automatically deletes all older stale `session_*.bin` cache files from device storage.
 
 ---
@@ -178,9 +183,9 @@ versioning, signing, publication, and recovery.
 
 ## 📈 Project Status & Roadmap
 
-The canonical SMS handoff is [docs/sms-processing-next-steps.md](docs/sms-processing-next-steps.md).
-It distinguishes implemented v4 source from the planned exception-only review
-route and from still-open emulator/physical-device acceptance.
+The canonical SMS pipeline reference is [docs/sms-processing-next-steps.md](docs/sms-processing-next-steps.md),
+covering the consolidated `pocketfinancer.sms-pipeline/1` contract, body-free
+tombstones, 5-minute duplicate window, and emulator/device verification.
 
 - [x] **Phase 1-4**: Core Native JNI bindings, llama.cpp compilation, & Model Downloader pipeline.
 - [x] **Phase 5**: Pipeline service orchestration, validation rules, & SQLCipher secure database persistence.

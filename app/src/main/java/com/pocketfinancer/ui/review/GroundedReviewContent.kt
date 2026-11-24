@@ -53,7 +53,13 @@ internal fun GroundedReviewContent(
     padding: PaddingValues,
     viewModel: ReviewViewModel
 ) {
-    if (details.operation.contractReleaseId in setOf("native-integration-v5", "native-integration-v6")) {
+    if (
+        details.operation.contractReleaseId in setOf(
+            "native-integration-v5",
+            "native-integration-v6",
+            "pocketfinancer.sms-pipeline/1"
+        )
+    ) {
         AutomaticPolicyReviewContent(details, state, padding, viewModel)
         return
     }

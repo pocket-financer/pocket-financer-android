@@ -153,7 +153,7 @@ interface SmsProcessingDao {
           AND review.state = 'open'
           AND review.revision = 0
           AND review.draftJson IS NULL
-          AND operation.contractReleaseId IN ('native-integration-v5', 'native-integration-v6')
+          AND operation.contractReleaseId IN ('native-integration-v5', 'native-integration-v6', 'pocketfinancer.sms-pipeline/1')
         ORDER BY operation.createdAt DESC, review.updatedAt DESC, review.id DESC
         LIMIT 1
         """
@@ -398,6 +398,44 @@ interface SmsProcessingDao {
         """
     )
     suspend fun eraseTerminalSource(sourceId: String, expectedDeletionEpoch: Long): Int
+
+    @Query(
+        """
+        UPDATE sms_admitted_sources
+        SET rawMessage = '',
+            sender = '',
+            retentionState = :retentionState,
+            sourceAlternateFingerprint = :tombstoneMetadata,
+            deletionEpoch = deletionEpoch + 1
+        WHERE id = :sourceId AND deletionEpoch = :expectedDeletionEpoch
+        """
+    )
+    suspend fun tombstoneSource(
+        sourceId: String,
+        expectedDeletionEpoch: Long,
+        retentionState: String,
+        tombstoneMetadata: String
+    ): Int
+
+    @Query(
+        """
+        UPDATE sms_admitted_sources
+        SET sourceMessageId = :messageId,
+            sourceProviderMessageId = COALESCE(sourceProviderMessageId, :providerMessageId),
+            sourceAlternateFingerprint = COALESCE(sourceAlternateFingerprint, :alternateFingerprint)
+        WHERE id = :sourceId
+          AND retentionState = 'admitted'
+          AND NOT EXISTS (
+              SELECT 1 FROM sms_processing_operations WHERE sourceId = :sourceId
+          )
+        """
+    )
+    suspend fun preserveAdmittedSourceMetadata(
+        sourceId: String,
+        messageId: String,
+        providerMessageId: String?,
+        alternateFingerprint: String?
+    ): Int
 
     @Query(
         """

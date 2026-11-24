@@ -77,7 +77,8 @@ data class SmsReviewDetails(
     val groundedProposal: SmsReviewProposal?,
     val draftProposal: SmsReviewProposal?,
     val draftCorrections: List<SmsFieldCorrection>,
-    val retainedEvidence: SmsReviewRetainedEvidence?
+    val retainedEvidence: SmsReviewRetainedEvidence?,
+    val windowDuplicateMatchCount: Int = 0
 )
 
 @Singleton
@@ -119,6 +120,18 @@ class SmsReviewRepository @Inject constructor(
                 )
             }.getOrNull()
         }
+        val windowDuplicateMatchCount = proposal?.resolvedAccountId?.let { accountId ->
+            transactionDao.countMatchingTransactionsInWindow(
+                accountId = accountId,
+                direction = proposal.direction,
+                minorUnits = proposal.amountMinorUnits,
+                currency = proposal.currency,
+                occurredAtEpochMs = proposal.receiptTimestampEpochMs,
+                windowMs = DUPLICATE_WINDOW_MS,
+                excludeSourceId = source.id,
+                excludeOperationId = operation.id
+            )
+        } ?: 0
         return SmsReviewDetails(
             review,
             source,
@@ -135,9 +148,30 @@ class SmsReviewRepository @Inject constructor(
                 extension,
                 operation.configurationJson,
                 source.rawMessage
-            )
+            ),
+            windowDuplicateMatchCount
         )
     }
+
+    suspend fun countPossibleDuplicatesInWindow(
+        accountId: String,
+        direction: String,
+        minorUnits: Long,
+        currency: String,
+        occurredAtEpochMs: Long,
+        excludeSourceId: String? = null,
+        excludeOperationId: String? = null,
+        windowMs: Long = DUPLICATE_WINDOW_MS
+    ): Int = transactionDao.countMatchingTransactionsInWindow(
+        accountId = accountId,
+        direction = direction,
+        minorUnits = minorUnits,
+        currency = currency.uppercase(java.util.Locale.ROOT),
+        occurredAtEpochMs = occurredAtEpochMs,
+        windowMs = windowMs,
+        excludeSourceId = excludeSourceId,
+        excludeOperationId = excludeOperationId
+    )
 
     suspend fun resolve(command: SmsReviewCommand, now: Long): SmsReviewReceipt =
         database.withTransaction {
@@ -234,7 +268,13 @@ class SmsReviewRepository @Inject constructor(
         if (operation.contractReleaseId == "native-integration-v4") {
             return projectV4Review(operation, source, command, now)
         }
-        if (operation.contractReleaseId in setOf("native-integration-v5", "native-integration-v6")) {
+        if (
+            operation.contractReleaseId in setOf(
+                "native-integration-v5",
+                "native-integration-v6",
+                "pocketfinancer.sms-pipeline/1"
+            )
+        ) {
             return projectV5Review(operation, source, command, now)
         }
         val result = dao.getReconstructedResult(operationId)?.semanticResultJson
@@ -557,11 +597,14 @@ class SmsReviewRepository @Inject constructor(
             "Stored configuration payload changed"
         }
         val releaseId = configuration.getJSONObject("contract_release").optString("release_id")
+        val contract = configuration.optString("contract")
         check(
             (releaseId == "native-integration-v5" &&
-                configuration.optString("contract") == "pocketfinancer.processing-config/5") ||
+                contract == "pocketfinancer.processing-config/5") ||
                 (releaseId == "native-integration-v6" &&
-                    configuration.optString("contract") == "pocketfinancer.processing-config/6")
+                    contract == "pocketfinancer.processing-config/6") ||
+                (releaseId == "pocketfinancer.sms-pipeline/1" &&
+                    contract == "pocketfinancer.sms-pipeline/1")
         )
         check(configuration.getJSONObject("persistence_policy").optString("rollout_mode") == "automatic")
         check(configuration.optString("source_ref_hash") == SmsProcessingStore.sha256(source.id)) {
@@ -892,4 +935,8 @@ class SmsReviewRepository @Inject constructor(
         "\"retry_configuration\":" +
         "${command.retryConfiguration?.let(JSONObject::quote) ?: "null"}," +
         "\"review_case_id\":${JSONObject.quote(command.reviewCaseId)}}"
+
+    companion object {
+        const val DUPLICATE_WINDOW_MS = SmsProcessingStore.DUPLICATE_WINDOW_MS
+    }
 }

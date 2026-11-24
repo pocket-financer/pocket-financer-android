@@ -273,6 +273,57 @@ class TransactionDaoTest {
             assertEquals("other_acct", tx3Updated?.accountId)
         }
     }
+
+    @Test
+    fun `countMatchingTransactionsInWindow enforces 5 minute window and dimensions`() {
+        runBlocking {
+            val baseTime = 1_700_000_000_000L
+            dao.insert(
+                TransactionEntity(
+                    id = "tx-base",
+                    amount = 500.0,
+                    merchant = "Cafe",
+                    date = baseTime,
+                    type = "debit",
+                    accountId = "acct-1",
+                    rawMessage = "INR 500.00 debited from XX1234",
+                    sender = "SYNTH",
+                    sourceId = "src-1",
+                    sourceEventId = "evt-1",
+                    exactMinorUnits = 50_000L,
+                    currencyCode = "INR",
+                    currencyScale = 2
+                )
+            )
+
+            assertEquals(
+                1,
+                dao.countMatchingTransactionsInWindow(
+                    accountId = "acct-1",
+                    direction = "debit",
+                    minorUnits = 50_000L,
+                    currency = "INR",
+                    occurredAtEpochMs = baseTime - 300_000L,
+                    windowMs = 300_000L,
+                    excludeSourceId = "src-2",
+                    excludeOperationId = "op-2"
+                )
+            )
+            assertEquals(
+                0,
+                dao.countMatchingTransactionsInWindow(
+                    accountId = "acct-1",
+                    direction = "debit",
+                    minorUnits = 50_000L,
+                    currency = "INR",
+                    occurredAtEpochMs = baseTime,
+                    windowMs = 300_000L,
+                    excludeSourceId = "src-1",
+                    excludeOperationId = "op-2"
+                )
+            )
+        }
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)

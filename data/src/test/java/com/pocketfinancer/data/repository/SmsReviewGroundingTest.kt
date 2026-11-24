@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertNull
+import org.json.JSONObject
 
 class SmsReviewGroundingTest {
     private val source = "🔔 INR 1,250.00 debited from XX1234 at Café"
@@ -136,6 +137,38 @@ class SmsReviewGroundingTest {
                 source
             )
         )
+    }
+
+    @Test
+    fun `retainedEvidence accepts consolidated sms pipeline contract`() {
+        val config = JSONObject()
+            .put("contract", "pocketfinancer.sms-pipeline/1")
+            .put("contract_release", JSONObject().put("release_id", "pocketfinancer.sms-pipeline/1"))
+            .put("persistence_policy", JSONObject().put("rollout_mode", "automatic"))
+            .put("currency_context", JSONObject().put("primary_currency", "INR"))
+            .put(
+                "received_timestamp",
+                JSONObject()
+                    .put("epoch_ms", 123456789L)
+                    .put("provenance", "platform_received")
+                    .put("read_only", true)
+            )
+            .toString()
+        val ext = com.pocketfinancer.data.db.entity.SmsReviewCaseV2ExtensionEntity(
+            reviewCaseId = "rev-1",
+            operationId = "op-1",
+            contractVersion = "pocketfinancer.review-case/2",
+            furthestStage = "extractor_validation",
+            analyzerSuggestionsJson = "[]",
+            fieldEvidenceJson = "[]",
+            createdAt = 1L
+        )
+        val retained = SmsReviewGrounding.retainedEvidence(ext, config, source)
+        assertEquals("INR", retained?.primaryCurrency)
+        assertEquals("debit", SmsReviewGrounding.directionFrom("sent via UPI"))
+        assertEquals("debit", SmsReviewGrounding.directionFrom("TXN at shop"))
+        assertEquals("credit", SmsReviewGrounding.directionFrom("reversed to card"))
+        assertEquals("credit", SmsReviewGrounding.directionFrom("cashback"))
     }
 
     private fun correction(

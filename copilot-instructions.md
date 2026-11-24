@@ -1,24 +1,20 @@
 # Pocket Financer Android development instructions
 
 Read `AGENTS.md` first. For SMS work, also read
-`docs/sms-processing-next-steps.md` and the canonical documents in the sibling
-`pocket-financer-intelligence` repository:
-
-- `docs/architecture/SMS_PROCESSING_ARCHITECTURE.md`
-- `docs/plans/CROSS_PLATFORM_SMS_ROADMAP.md`
-- `docs/plans/SMS_EVALUATION_STRATEGY.md`
-- `docs/contracts/NATIVE_SMS_INTEGRATION_CONTRACT.md`
+`docs/sms-processing-next-steps.md` and the canonical contract assets synchronized from
+`pocket-financer-intelligence` (`pipeline/src/main/assets/sms_processing/release-manifest.json`).
 
 ## SMS architecture
 
-The local SLM is the central classifier and extractor. Deterministic SMS analysis
-is advisory evidence, not a terminal allowlist. The host owns strict parsing,
-Unicode-scalar grounding, exact minor units, account resolution, duplicates,
-receipt time, persistence, durable operation ownership, review, and recovery.
-
-The current native v4 path is review-only. Complete valid v4 results still go to
-Review. Direct-to-Transactions routing is planned for an additive successor
-contract and must not be retrofitted into frozen v1-v4 behavior.
+Unambiguously non-transactional alerts are excluded pre-SLM by `SmsPrefilter`
+(`sms-prefilter/1`) and retained as body-free `tombstoned_excluded` records.
+Otherwise the local SLM is the central classifier and extractor. Deterministic SMS
+analysis is advisory evidence, not a terminal allowlist. The host owns strict
+parsing, Unicode-scalar grounding, exact minor units, account resolution, 5-minute
+duplicate checks (`300_000` ms), receipt time, persistence, durable operation
+ownership, review, and recovery under the unified `pocketfinancer.sms-pipeline/1`
+contract (`complete posted -> Transactions`, `valid none -> tombstoned_none`,
+`exception / duplicate -> Review`).
 
 ## Repository responsibilities
 
@@ -49,7 +45,7 @@ invent or expose chain of thought, and never log private SMS/model text.
 
 ## Model identity
 
-Android is file-backed. An eligible v4 operation records the real SHA-256 of the
+Android is file-backed. An eligible operation records the real SHA-256 of the
 GGUF bytes it used. Never use a placeholder or a hash of a model name/path.
 System-managed-runtime provenance is for platforms without a readable artifact.
 

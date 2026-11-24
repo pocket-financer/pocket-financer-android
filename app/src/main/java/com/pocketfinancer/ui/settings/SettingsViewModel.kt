@@ -1163,7 +1163,6 @@ class SettingsViewModel @Inject constructor(
         const val APP_SETTINGS = ".app_settings"
         const val SELECTED_SLM_ID = "selected_slm_id"
         const val ONBOARDING_COMPLETED = "onboarding_completed"
-        const val GRAMMAR_ASSET = "sms_extraction.gbnf"
     }
 }
 

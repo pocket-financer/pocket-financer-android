@@ -23,7 +23,31 @@ and the planned Android/iOS native scoring lanes. This repository owns the
 Windows/Gradle, Kotlin/JNI, Room, Compose, emulator, and Android-device
 implementation lane.
 
-## Implemented source baseline
+## Consolidated SMS pipeline (`pocketfinancer.sms-pipeline/1`)
+
+The consolidated SMS pipeline binds a single contract release
+(`pocketfinancer.sms-pipeline/1`, manifest verified by `SmsContractAssets`)
+across Android and sibling repositories:
+
+- **Deterministic prefilter (`SmsPrefilter` / `sms-prefilter/1`)**: empty,
+  no-digit, gaming-promo, collect/mandate-request, OTP, telecom, brokerage-EOD,
+  and no-financial-cue alerts exclude pre-SLM as body-free `tombstoned_excluded`
+  records (`rawMessage = ""`, retaining `sourceId`, SHA-256 body digest, safe
+  reason, and timestamp in `AdmittedSmsSourceEntity`).
+- **One coordinator & snapshot factory**: `DefaultSmsProcessingCoordinator`,
+  `SmsOperationSnapshotFactory`, `SmsProcessingJson`, and `SmsModelIdentity`
+  replace the historical v2/v3/v4/v5/v6 adapters (`NativeSmsV*Assets`,
+  `PromptBuilder`, `ExtractionParser`, `SmsFilterPipeline`, etc.), while stored
+  Room schema migrations (6->7->8) and historical Review UI records remain
+  supported without altering the database schema.
+- **Routing & parity**: valid `none` settles as body-free `tombstoned_none`;
+  complete valid `posted` extractions with one resolved account and a clear
+  5-minute duplicate window (`DUPLICATE_WINDOW_MS = 300_000` ms across
+  `(accountId, direction, minorUnits, currency)` excluding the current source
+  and operation) persist atomically to `Transactions`; exceptions and possible
+  duplicates route to `Review`.
+
+## Implemented historical baseline
 
 The existing source includes strict extractor parsing, Unicode-scalar conversion,
 exact minor-unit normalization, account resolution, sanitized vectors, durable

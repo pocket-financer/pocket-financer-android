@@ -13,7 +13,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import com.pocketfinancer.pipeline.SmsFilterPipeline
+import com.pocketfinancer.pipeline.sms.SmsPrefilter
 import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
 import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivity
 import com.pocketfinancer.pipeline.AutomaticSmsProcessingActivityStore
@@ -381,7 +381,6 @@ class HomeViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val transactionRepository: TransactionRepository,
     private val syncManager: HomeSyncManager,
-    private val smsFilterPipeline: SmsFilterPipeline,
     private val modelStorage: SlmModelStorage,
     private val deviceCapabilities: DeviceCapabilities,
     private val modelDownloader: ModelDownloader,
@@ -1060,20 +1059,24 @@ class HomeViewModel @Inject constructor(
         if (!item.hasDiagnosticSourceEvidence()) {
             return listOf(SOURCE_EVIDENCE_UNAVAILABLE)
         }
-        return smsFilterPipeline.filterWithDetails(item.sender, item.body).logs
+        return prefilterDiagnosticLogs(item.body)
     }
 
     fun getHistoricalFilterLogs(
         activity: HistoricalSmsProcessingActivity
-    ): List<String> = smsFilterPipeline
-        .filterWithDetails(activity.sender, activity.body)
-        .logs
+    ): List<String> = prefilterDiagnosticLogs(activity.body)
 
     fun getAutomaticFilterLogs(
         activity: AutomaticSmsProcessingActivity
-    ): List<String> = smsFilterPipeline
-        .filterWithDetails(activity.sender, activity.body)
-        .logs
+    ): List<String> = prefilterDiagnosticLogs(activity.body)
+
+    private fun prefilterDiagnosticLogs(body: String): List<String> {
+        val result = SmsPrefilter.evaluate(body)
+        return listOf(
+            "Policy: ${SmsPrefilter.POLICY_ID}",
+            "Decision: ${result.decision.wireValue} (${result.traceReasonCode})"
+        )
+    }
 
     fun getHistoricalPromptContent(
         @Suppress("UNUSED_PARAMETER") activity: HistoricalSmsProcessingActivity

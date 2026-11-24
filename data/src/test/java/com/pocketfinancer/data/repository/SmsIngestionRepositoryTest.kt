@@ -19,6 +19,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -578,6 +579,79 @@ class SmsIngestionRepositoryTest {
                 context.deleteDatabase(databaseName)
             }
         }
+
+    @Test
+    fun `converged broadcast and provider admission keeps single durable source row`() = runBlocking {
+        val sentAt = TEST_DATE
+        val broadcast = candidate(providerId = null, date = sentAt, sourceTimestamp = sentAt)
+        val provider = candidate(providerId = "991", date = sentAt + 500L, sourceTimestamp = sentAt)
+
+        val first = ingestionRepository.admit(broadcast)
+        val second = ingestionRepository.admit(provider)
+
+        assertEquals(first.candidateKey, second.candidateKey)
+        val sourceRow = database.smsProcessingDao().getSource(first.candidateKey)!!
+        assertEquals("991", sourceRow.sourceProviderMessageId)
+        assertEquals(provider.sourceIdentity.messageId, sourceRow.sourceMessageId)
+        val countCursor = database.openHelper.readableDatabase
+            .query("SELECT COUNT(*) FROM sms_admitted_sources")
+        countCursor.use {
+            assertTrue(it.moveToFirst())
+            assertEquals(1, it.getInt(0))
+        }
+    }
+
+    @Test
+    fun `tombstoned excluded source skips requeue without losing tombstone state`() = runBlocking {
+        val otpCandidate = candidate(
+            providerId = null,
+            body = "Your OTP is 482910. Do not share.",
+            date = TEST_DATE,
+            sourceTimestamp = TEST_DATE
+        )
+        val first = ingestionRepository.admit(otpCandidate)
+        val store = SmsProcessingStore(database, database.smsProcessingDao())
+        val claimed = assertIs<SmsProcessingAdmission.Claimed>(
+            store.admitForProcessing(database.smsProcessingDao().getSource(first.candidateKey)!!) { saved ->
+                val op = com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity(
+                    id = java.util.UUID.randomUUID().toString(),
+                    sourceId = saved.id,
+                    parentOperationId = null,
+                    stableEventId = java.util.UUID.randomUUID().toString(),
+                    trigger = "realtime",
+                    configurationJson = "{}",
+                    configurationHash = SmsProcessingStore.sha256("{}"),
+                    contractReleaseId = "pocketfinancer.sms-pipeline/1",
+                    state = "ready",
+                    transitionSequence = 0,
+                    ownerToken = null,
+                    ownerGeneration = 0,
+                    claimExpiresAt = null,
+                    createdAt = TEST_DATE,
+                    updatedAt = TEST_DATE,
+                    settledAt = null,
+                    settlementReceiptJson = null,
+                    deletionEpoch = 0
+                )
+                store.createOperation(op)
+                op.id
+            }
+        )
+        store.settleDiscarded(
+            claimed.claim,
+            "prefilter_otp_verification",
+            TEST_DATE + 10,
+            SmsProcessingStore.RETENTION_TOMBSTONED_EXCLUDED
+        )
+        ingestionRepository.discardTerminal(first.candidateKey)
+
+        val replay = ingestionRepository.admit(otpCandidate)
+        assertEquals(first.candidateKey, replay.candidateKey)
+        assertEquals(0, ingestionRepository.pendingCount())
+        val retained = database.smsProcessingDao().getSource(first.candidateKey)!!
+        assertEquals("", retained.rawMessage)
+        assertEquals(SmsProcessingStore.RETENTION_TOMBSTONED_EXCLUDED, retained.retentionState)
+    }
 
     private fun candidate(
         providerId: String?,

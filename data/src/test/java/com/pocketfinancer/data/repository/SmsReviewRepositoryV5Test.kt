@@ -213,6 +213,55 @@ class SmsReviewRepositoryV5Test {
         )
     }
 
+    @Test
+    fun `consolidated sms pipeline release supports automatic review details and confirmation`() = runBlocking {
+        val consolidatedConfig = JSONObject(configurationPayload().toString())
+            .put("contract", "pocketfinancer.sms-pipeline/1")
+            .put(
+                "contract_release",
+                JSONObject().put("release_id", "pocketfinancer.sms-pipeline/1")
+            )
+        val configHash = SmsProcessingStore.sha256(canonical(consolidatedConfig))
+        consolidatedConfig.put("config_hash", configHash)
+        val configJson = canonical(consolidatedConfig)
+        database.accountDao().insert(AccountEntity(ACCOUNT_ID, "A/c XX1234", "Synth Bank", "manual"))
+        database.smsProcessingDao().insertSource(
+            AdmittedSmsSourceEntity(
+                SOURCE_ID, "synthetic", "synthetic:$SOURCE_ID", null,
+                SmsProcessingStore.sha256(SOURCE), null, "SYNTH", SOURCE,
+                RECEIPT_TIME, 1, "manual", "receipt-1", RECEIPT_TIME, "admitted"
+            )
+        )
+        database.smsProcessingDao().insertOperation(
+            SmsProcessingOperationEntity(
+                OPERATION_ID, SOURCE_ID, null, EVENT_ID, "manual",
+                configJson, configHash,
+                "pocketfinancer.sms-pipeline/1", "retain_review",
+                1, null, 1, null, NOW, NOW, NOW, "{}", 0
+            )
+        )
+        database.smsProcessingDao().insertReviewCase(
+            SmsReviewCaseEntity(
+                REVIEW_ID, SOURCE_ID, OPERATION_ID, "open", 0,
+                "[\"account_resolution_unresolved\"]", null, "[\"$EVENT_ID\"]", NOW, NOW
+            )
+        )
+        database.smsProcessingDao().upsertReviewCaseV2Extension(
+            SmsReviewCaseV2ExtensionEntity(
+                REVIEW_ID, OPERATION_ID, "pocketfinancer.review-case/2",
+                "extractor_validation", "[]", fieldEvidence().toString(), NOW
+            )
+        )
+
+        val details = repository.details(REVIEW_ID)
+        assertEquals(0, details.windowDuplicateMatchCount)
+        assertEquals(1_000L, details.retainedEvidence?.slmFields?.get("amount")
+            ?.normalizedValueJson?.let(::JSONObject)?.getLong("minor_units"))
+
+        repository.resolve(command(includeAccount = true), NOW + 1)
+        assertEquals(1, database.transactionDao().count())
+    }
+
     private fun command(includeAccount: Boolean, includeAccountSpan: Boolean = true): SmsReviewCommand {
         val corrections = mutableListOf(
             correction("amount", span(0, 9, "INR 10.00"),
