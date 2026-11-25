@@ -74,7 +74,7 @@ class SmsProcessingPresentationTest {
         )
         assertEquals(SmsPipelinePhase.PROCESSING, model.phase)
         assertEquals(SmsStopUiState.AVAILABLE, model.stopState)
-        assertEquals("Extracting transaction", model.stepValue)
+        assertEquals("Selecting grounded candidates", model.stepValue)
     }
 
     @Test
@@ -147,12 +147,10 @@ class SmsProcessingPresentationTest {
         val activity = automaticActivity().copy(
             stage = AutomaticSmsProcessingStage.GENERATING,
             filterResult = AutomaticSmsFilterResult.PASSED,
-            hasThinkingMode = true,
             modelName = "local-model.gguf",
             grammarEnabled = false,
-            thinkingTokenBudget = 1024,
             answerTokenBudget = 256,
-            thinkingOutput = "private reasoning",
+            decodedTokenDelta = "}",
             jsonOutput = "{partial}",
             performance = AutomaticSmsSlmPerformance(12, 2_000, 40),
             cache = AutomaticSmsSlmCacheTelemetry(true, false, 300)
@@ -177,6 +175,8 @@ class SmsProcessingPresentationTest {
         assertEquals(true, model.runtimeFacts?.cacheAttempted)
         assertEquals(false, model.runtimeFacts?.cacheHit)
         assertEquals("40 tokens • 20.00 tok/s", model.performanceText)
+        assertEquals("}", model.decodedTokenDelta)
+        assertEquals("{partial}", model.cumulativeStructuredOutput)
         assertEquals("Waiting for complete JSON...", model.parsedOutput)
         val source = (model.content as SmsTelemetryContent.Candidate).source
         assertEquals(
@@ -221,7 +221,7 @@ class SmsProcessingPresentationTest {
     @Test
     fun `stale automatic claim cannot rebind to successor telemetry`() {
         val successor = automaticActivity().copy(
-            thinkingOutput = "successor private reasoning",
+            decodedTokenDelta = "successor private delta",
             jsonOutput = "successor private json"
         )
         val staleTarget = SmsProcessingTarget.Automatic(
@@ -238,8 +238,8 @@ class SmsProcessingPresentationTest {
 
         assertEquals(staleTarget, model.target)
         assertTrue(model.content is SmsTelemetryContent.Gap)
-        assertEquals("", model.thinkingOutput)
         assertEquals("", model.jsonOutput)
+        assertEquals("", model.decodedTokenDelta)
         assertEquals("", model.slmPrompt)
         assertTrue(model.filterLogs.isEmpty())
         assertTrue(model.cacheLogs.isEmpty())
@@ -259,7 +259,6 @@ class SmsProcessingPresentationTest {
             target = staleTarget
         )
         assertTrue(differentCandidate.content is SmsTelemetryContent.Gap)
-        assertEquals("", differentCandidate.thinkingOutput)
         assertEquals("", differentCandidate.jsonOutput)
     }
 
@@ -337,7 +336,6 @@ class SmsProcessingPresentationTest {
             ),
             currentIndex = 0,
             currentStageIndex = 2,
-            thinkingOutput = "prior private reasoning",
             jsonOutput = "prior private output"
         ).toSmsPipelineCardUiModel()
 
@@ -422,8 +420,9 @@ class SmsProcessingPresentationTest {
                 queue = listOf(sms),
                 currentIndex = 0,
                 currentStageIndex = 2,
+                decodedTokenDelta = "partial-token",
                 jsonOutput = "{partial}",
-                thinkingOutput = "thinking"
+                jsonOutputTruncated = true
             ),
             sms = sms,
             filterLogs = listOf("checked"),
@@ -444,6 +443,9 @@ class SmsProcessingPresentationTest {
             active.target
         )
         assertEquals(SmsTelemetryStatus.ACTIVE, active.status)
+        assertEquals("partial-token", active.decodedTokenDelta)
+        assertEquals("{partial}", active.cumulativeStructuredOutput)
+        assertTrue(active.jsonOutputTruncated)
         assertEquals("Waiting for complete JSON...", active.parsedOutput)
         assertEquals(SmsStopUiState.AVAILABLE, active.stopState)
         assertTrue(active.isActiveCandidate)
@@ -489,7 +491,7 @@ class SmsProcessingPresentationTest {
                 queue = listOf(sms),
                 currentIndex = 0,
                 currentStageIndex = 2,
-                thinkingOutput = "successor private reasoning",
+                decodedTokenDelta = "successor private delta",
                 jsonOutput = "successor private output"
             ),
             sms = sms,
@@ -510,8 +512,8 @@ class SmsProcessingPresentationTest {
         assertTrue(model.content is SmsTelemetryContent.Gap)
         assertFalse(model.isActiveCandidate)
         assertEquals(SmsStopUiState.HIDDEN, model.stopState)
-        assertEquals("", model.thinkingOutput)
         assertFalse(model.jsonOutput.contains("successor private output"))
+        assertEquals("", model.decodedTokenDelta)
         assertTrue(model.filterLogs.isEmpty())
         assertTrue(model.cacheLogs.isEmpty())
         assertEquals("", model.slmPrompt)
@@ -526,7 +528,6 @@ class SmsProcessingPresentationTest {
                 activeRunId = "same-run",
                 queue = listOf(successor),
                 currentIndex = 0,
-                thinkingOutput = "next private reasoning",
                 jsonOutput = "next private output"
             ),
             sms = successor.copy(id = "prior-candidate"),
@@ -542,7 +543,6 @@ class SmsProcessingPresentationTest {
 
         assertTrue(model.content is SmsTelemetryContent.Gap)
         assertEquals(SmsStopUiState.HIDDEN, model.stopState)
-        assertEquals("", model.thinkingOutput)
         assertEquals("", model.jsonOutput)
         assertTrue(model.filterLogs.isEmpty())
         assertTrue(model.cacheLogs.isEmpty())
@@ -554,10 +554,7 @@ class SmsProcessingPresentationTest {
         val model = SmsTelemetryPresenter.historical(
             activity = historicalActivity().copy(
                 grammarEnabled = false,
-                thinkingTokenBudget = 1024,
                 answerTokenBudget = 256,
-                thinkingOutput = "partial reasoning",
-                thinkingOutputTruncated = true,
                 performance = HistoricalSlmPerformance(
                     promptEvalMs = 12,
                     evalMs = 2_000,
@@ -567,7 +564,9 @@ class SmsProcessingPresentationTest {
                     attempted = true,
                     hit = true,
                     prefixTokens = 300
-                )
+                ),
+                decodedTokenDelta = "latest-token",
+                jsonOutput = "{partial}"
             ),
             runId = "history-run-6",
             filterLogs = listOf("eligible"),
@@ -583,7 +582,7 @@ class SmsProcessingPresentationTest {
             ),
             model.target
         )
-        assertEquals(1024, model.runtimeFacts?.thinkingTokenBudget)
+        assertEquals(256, model.runtimeFacts?.answerTokenBudget)
         assertEquals(true, model.runtimeFacts?.cacheHit)
         assertEquals(listOf(
             "Prefix cache attempted: true",
@@ -591,7 +590,8 @@ class SmsProcessingPresentationTest {
             "Cached prefix tokens: 300"
         ), model.cacheLogs)
         assertEquals("40 tokens • 20.00 tok/s", model.performanceText)
-        assertTrue(model.thinkingOutputTruncated)
+        assertEquals("latest-token", model.decodedTokenDelta)
+        assertEquals("{partial}", model.cumulativeStructuredOutput)
     }
 
     @Test
@@ -603,8 +603,8 @@ class SmsProcessingPresentationTest {
         )
 
         assertTrue(model.content is SmsTelemetryContent.Gap)
-        assertEquals("", model.thinkingOutput)
         assertEquals("", model.jsonOutput)
+        assertEquals("", model.decodedTokenDelta)
         assertEquals("", model.slmPrompt)
         assertTrue(model.filterLogs.isEmpty())
         assertTrue(model.cacheLogs.isEmpty())
@@ -642,8 +642,7 @@ class SmsProcessingPresentationTest {
         date = 0L,
         position = 2,
         total = 8,
-        stage = HistoricalSmsProcessingStage.GENERATING,
-        hasThinkingMode = true
+        stage = HistoricalSmsProcessingStage.GENERATING
     )
 
     private fun automaticActivity() = AutomaticSmsProcessingActivity(

@@ -21,6 +21,7 @@ internal data class SetupImportCardModel(
 )
 
 internal enum class SetupCardAction {
+    OPEN_REVIEWS,
     PREPARE_MODEL,
     RESUME,
     RESTORE_PERMISSION,
@@ -30,6 +31,7 @@ internal enum class SetupCardAction {
 }
 
 internal enum class SetupCardActionTarget {
+    OPEN_REVIEWS,
     START_SETUP,
     SCAN_OLDER,
     RETRY_RECENT_SYNC,
@@ -37,6 +39,7 @@ internal enum class SetupCardActionTarget {
 }
 
 internal fun SetupCardAction.target(): SetupCardActionTarget = when (this) {
+    SetupCardAction.OPEN_REVIEWS -> SetupCardActionTarget.OPEN_REVIEWS
     SetupCardAction.PREPARE_MODEL,
     SetupCardAction.RESUME,
     SetupCardAction.SCAN_RECENT -> SetupCardActionTarget.START_SETUP
@@ -127,7 +130,9 @@ internal fun setupImportCardModel(
                     "No usable local model is available. Preparing it uses " +
                         "about 700 MB and starts only after you confirm."
                 )
-                if (state.hasVerifiedCoverage) {
+                if (state.retainedReviewCount > 0) {
+            retainedReviewCard(state)
+        } else if (state.hasVerifiedCoverage) {
                     append(" Your previously verified SMS coverage is preserved.")
                 }
             },
@@ -317,13 +322,15 @@ internal fun setupImportCardModel(
         },
         evidence =
             "${state.processedCount} of ${state.eligibleCandidateCount} checked · " +
-                "${state.savedCount} saved · ${state.rejectedCount} rejected" +
+                "${state.savedCount} saved · ${state.retainedReviewCount} for review · ${state.rejectedCount} rejected" +
                 if (state.failedCount > 0) " · ${state.failedCount} failed" else "",
         showProgress = true
     )
 
     SetupImportStatus.READY -> {
-        if (state.hasVerifiedCoverage) {
+        if (state.retainedReviewCount > 0) {
+            retainedReviewCard(state)
+        } else if (state.hasVerifiedCoverage) {
             SetupImportCardModel(
                 eyebrow = "READY",
                 title = if (coverageIsFresh(state, nowMillis)) {
@@ -347,7 +354,9 @@ internal fun setupImportCardModel(
         }
     }
 
-    SetupImportStatus.READY_NO_HISTORY -> SetupImportCardModel(
+    SetupImportStatus.READY_NO_HISTORY -> if (state.retainedReviewCount > 0) {
+        retainedReviewCard(state)
+    } else SetupImportCardModel(
         eyebrow = if (automaticProcessingEnabled) {
             "READY FOR THE NEXT ALERT"
         } else {
@@ -359,7 +368,7 @@ internal fun setupImportCardModel(
             SetupEmptyReason.FILTERED_OUT ->
                 "Messages were found, but none looked transactional"
             SetupEmptyReason.CANDIDATES_REJECTED ->
-                "Potential alerts were checked, but none were saved"
+                "History checked; no transactions added"
             SetupEmptyReason.NO_ADDITIONAL_MESSAGES ->
                 "No additional eligible alerts were found"
             SetupEmptyReason.NO_ELIGIBLE_WITHIN_90_DAYS ->
@@ -367,6 +376,9 @@ internal fun setupImportCardModel(
             else -> "No eligible transaction history was found"
         },
         body = buildString {
+            if (state.emptyReason == SetupEmptyReason.CANDIDATES_REJECTED) {
+                append("Open saved alert reviews to check for retained alerts. ")
+            }
             append(coverageDescription(state))
             if (automaticProcessingEnabled) {
                 append(
@@ -381,8 +393,12 @@ internal fun setupImportCardModel(
             }
         },
         evidence = scanEvidence(state),
-        primaryAction = SetupCardAction.SCAN_OLDER,
-        primaryLabel = "Scan older messages"
+        primaryAction = if (state.emptyReason == SetupEmptyReason.CANDIDATES_REJECTED) {
+            SetupCardAction.OPEN_REVIEWS
+        } else SetupCardAction.SCAN_OLDER,
+        primaryLabel = if (state.emptyReason == SetupEmptyReason.CANDIDATES_REJECTED) {
+            "Open saved alert reviews"
+        } else "Scan older messages"
     )
 
     SetupImportStatus.PAUSED -> when {
@@ -513,3 +529,12 @@ private fun scanEvidence(state: SetupImportState): String? {
         if (state.savedCount > 0) append(" · ${state.savedCount} saved")
     }
 }
+
+private fun retainedReviewCard(state: SetupImportState) = SetupImportCardModel(
+    eyebrow = "HISTORY CHECKED",
+    title = "Alerts saved for your review",
+    body = "${state.retainedReviewCount} alerts need review. Open them to confirm, correct, retry, or reject; transactions already saved remain in Transactions.",
+    evidence = scanEvidence(state),
+    primaryAction = SetupCardAction.OPEN_REVIEWS,
+    primaryLabel = "Open saved alert reviews"
+)

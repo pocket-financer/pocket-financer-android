@@ -7,15 +7,13 @@ import android.util.Log
 import com.pocketfinancer.ProvisionalSelectedModelPin
 import com.pocketfinancer.SelectedModelResidency
 import com.pocketfinancer.SlmAppFlowCoordinator
-import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.repository.TransactionRepository
+import com.pocketfinancer.data.repository.ProcessingConfigurationRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
 import com.pocketfinancer.inference.DownloadOwner
 import com.pocketfinancer.inference.ModelDownloader
 import com.pocketfinancer.inference.SlmActiveOperation
-import com.pocketfinancer.inference.SlmExtractionRequest
-import com.pocketfinancer.inference.SlmExtractionResult
 import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelSpec
 import com.pocketfinancer.inference.SlmModelStorage
@@ -26,11 +24,10 @@ import com.pocketfinancer.inference.SlmRuntimeOwner
 import com.pocketfinancer.inference.SlmRuntimePhase
 import com.pocketfinancer.inference.SlmRuntimeState
 import com.pocketfinancer.pipeline.AutomaticProcessingPreferences
-import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.pipeline.PromptBuilder
+import com.pocketfinancer.pipeline.PipelineService
 import com.pocketfinancer.pipeline.SlmProcessingPreferences
-import com.pocketfinancer.pipeline.SmsFilterPipeline
 import com.pocketfinancer.pipeline.SmsWorkController
+import com.pocketfinancer.sms.SmsWorkScheduler
 import com.pocketfinancer.setup.SetupImportState
 import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.ui.home.HomeSyncManager
@@ -424,17 +421,17 @@ class SettingsViewModelTest {
         }
 
     @Test
-    fun `test SMS snapshots disabled grammar for the complete queued inference`() =
+    fun `test SMS uses grounded direct pipeline and never reads legacy grammar`() =
         runTest(dispatcher) {
             val fixture = fixture(gbnfInitiallyEnabled = false, modelLoaded = true)
-            var capturedGrammar: String? = "not captured"
             coEvery {
                 fixture.runtime.acquire(SlmRuntimeOwner.SETTINGS_TEST, fixture.spec)
             } returns fixture.lease
-            coEvery { fixture.lease.extract(any()) } coAnswers {
-                capturedGrammar = firstArg<SlmExtractionRequest>().grammar
-                SlmExtractionResult.Null(model = fixture.spec)
-            }
+            coEvery {
+                fixture.pipelineService.processSingle(any(), fixture.lease, any(), "diagnostic")
+            } returns PipelineService.ProcessingResult.Skipped(
+                PipelineService.SkipReason.RETAINED_FOR_REVIEW
+            )
             coEvery { fixture.lease.release() } returns Unit
 
             val viewModel = fixture.createViewModel()
@@ -445,7 +442,10 @@ class SettingsViewModelTest {
             advanceTimeBy(1_801)
             runCurrent()
 
-            assertNull(capturedGrammar)
+            coVerify(exactly = 1) {
+                fixture.pipelineService.processSingle(any(), fixture.lease, any(), "diagnostic")
+            }
+            coVerify(exactly = 0) { fixture.lease.extract(any()) }
             verify(exactly = 0) {
                 fixture.storage.readTextAsset("sms_extraction.gbnf")
             }
@@ -455,21 +455,15 @@ class SettingsViewModelTest {
     fun `successful parser diagnostic never writes into the real ledger`() =
         runTest(dispatcher) {
             val fixture = fixture(gbnfInitiallyEnabled = false, modelLoaded = true)
-            val extracted = ExtractionParser.ExtractedTransaction(
-                amount = 500.0,
-                counterparty = "Demo",
-                type = TransactionType.CREDIT,
-                account = "account 0000"
-            )
             coEvery {
                 fixture.runtime.acquire(SlmRuntimeOwner.SETTINGS_TEST, fixture.spec)
             } returns fixture.lease
-            coEvery { fixture.lease.extract(any()) } returns SlmExtractionResult.Success(
-                json = """{"amount":500,"counterparty":"Demo","type":"credit","account":"0000"}""",
-                model = fixture.spec
+            coEvery {
+                fixture.pipelineService.processSingle(any(), fixture.lease, any(), "diagnostic")
+            } returns PipelineService.ProcessingResult.Skipped(
+                PipelineService.SkipReason.RETAINED_FOR_REVIEW
             )
             coEvery { fixture.lease.release() } returns Unit
-            every { fixture.extractionParser.parse(any()) } returns extracted
 
             val viewModel = fixture.createViewModel()
             runCurrent()
@@ -479,7 +473,7 @@ class SettingsViewModelTest {
 
             assertTrue(
                 "Unexpected diagnostic state: ${viewModel.state.value}",
-                viewModel.state.value.testParsed?.contains("amount=500.0") == true
+                viewModel.state.value.testParsed?.contains("Decision Trace") == true
             )
             coVerify(exactly = 0) {
                 fixture.transactionRepository.insert(any())
@@ -737,7 +731,6 @@ class SettingsViewModelTest {
         val deviceCapabilities = mockk<DeviceCapabilities>()
         val runtime = mockk<SlmRuntime>()
         val storage = mockk<SlmModelStorage>()
-        val promptBuilder = mockk<PromptBuilder>()
         val preferences = mockk<SlmProcessingPreferences>()
         val automaticProcessingPreferences = mockk<AutomaticProcessingPreferences>()
         val modelDownloader = mockk<ModelDownloader>(relaxed = true)
@@ -745,7 +738,6 @@ class SettingsViewModelTest {
         val selectedModelResidency = mockk<SelectedModelResidency>(relaxed = true)
         val gbnf = MutableStateFlow(gbnfInitiallyEnabled)
         val automaticProcessing = MutableStateFlow(automaticProcessingInitiallyEnabled)
-        val extractionParser = mockk<ExtractionParser>(relaxed = true)
         val transactionRepository = mockk<TransactionRepository>(relaxed = true)
         val smsWorkController = mockk<SmsWorkController>(relaxed = true)
         val setupImportStore = mockk<SetupImportStore>(relaxed = true)
@@ -767,8 +759,7 @@ class SettingsViewModelTest {
         val spec = SlmModelSpec(
             modelId = "test-model",
             modelPath = File(models, "test.gguf").absolutePath,
-            artifactRevision = "test",
-            hasThinkingMode = false
+            artifactRevision = "test"
         )
         val runtimeState = MutableStateFlow(
             if (modelLoaded) {
@@ -792,6 +783,7 @@ class SettingsViewModelTest {
         val onboardingState = MutableStateFlow(
             OnboardingSyncManager.OnboardingSyncState()
         )
+        val pipelineService = mockk<PipelineService>()
 
         every {
             context.getSharedPreferences(".app_settings", Context.MODE_PRIVATE)
@@ -841,9 +833,6 @@ class SettingsViewModelTest {
         every { lease.owner } returns SlmRuntimeOwner.SETTINGS_TEST
         every { lease.model } returns spec
         every { lease.isReleased } returns false
-        every { promptBuilder.getStaticPrefix() } returns "static prefix"
-        every { promptBuilder.buildExtractionPrompt(any(), any()) } returns "raw prompt"
-        every { promptBuilder.buildChatPrompt(any(), any()) } returns "chat prompt"
 
         return Fixture(
             context = context,
@@ -851,12 +840,10 @@ class SettingsViewModelTest {
             runtime = runtime,
             runtimeState = runtimeState,
             storage = storage,
-            promptBuilder = promptBuilder,
             preferences = preferences,
             gbnf = gbnf,
             automaticProcessingPreferences = automaticProcessingPreferences,
             automaticProcessing = automaticProcessing,
-            extractionParser = extractionParser,
             transactionRepository = transactionRepository,
             smsWorkController = smsWorkController,
             permissionHealthReader = permissionHealthReader,
@@ -872,7 +859,8 @@ class SettingsViewModelTest {
             homeSyncState = homeSyncState,
             manualOperationReservation = manualOperationReservation,
             onboardingSyncManager = onboardingSyncManager,
-            onboardingState = onboardingState
+            onboardingState = onboardingState,
+            pipelineService = pipelineService
         )
     }
 
@@ -882,12 +870,10 @@ class SettingsViewModelTest {
         val runtime: SlmRuntime,
         val runtimeState: MutableStateFlow<SlmRuntimeState>,
         val storage: SlmModelStorage,
-        val promptBuilder: PromptBuilder,
         val preferences: SlmProcessingPreferences,
         val gbnf: MutableStateFlow<Boolean>,
         val automaticProcessingPreferences: AutomaticProcessingPreferences,
         val automaticProcessing: MutableStateFlow<Boolean>,
-        val extractionParser: ExtractionParser,
         val transactionRepository: TransactionRepository,
         val smsWorkController: SmsWorkController,
         val permissionHealthReader: SettingsPermissionHealthReader,
@@ -905,7 +891,8 @@ class SettingsViewModelTest {
             MutableStateFlow<ManualOperationReservation?>,
         val onboardingSyncManager: OnboardingSyncManager,
         val onboardingState:
-            MutableStateFlow<OnboardingSyncManager.OnboardingSyncState>
+            MutableStateFlow<OnboardingSyncManager.OnboardingSyncState>,
+        val pipelineService: PipelineService
     ) {
         val homeSync: HomeSyncManager
             get() = homeSyncManager
@@ -914,15 +901,15 @@ class SettingsViewModelTest {
             get() = onboardingSyncManager
 
         fun createViewModel(): SettingsViewModel {
+            val processingConfiguration = mockk<ProcessingConfigurationRepository>(relaxed = true)
+            every { processingConfiguration.confirmedPrimaryCurrency() } returns "INR"
+            val smsWorkScheduler = mockk<SmsWorkScheduler>(relaxed = true)
             return SettingsViewModel(
                 context = context,
                 deviceCapabilities = deviceCapabilities,
                 slmRuntime = runtime,
                 modelStorage = storage,
                 modelDownloader = modelDownloader,
-                promptBuilder = promptBuilder,
-                extractionParser = extractionParser,
-                smsFilterPipeline = SmsFilterPipeline(),
                 transactionRepository = transactionRepository,
                 automaticProcessingPreferences = automaticProcessingPreferences,
                 slmProcessingPreferences = preferences,
@@ -935,7 +922,10 @@ class SettingsViewModelTest {
                     relaxed = true
                 ),
                 setupImportStore = setupImportStore,
-                permissionHealthReader = permissionHealthReader
+                permissionHealthReader = permissionHealthReader,
+                processingConfigurationRepository = processingConfiguration,
+                smsWorkScheduler = smsWorkScheduler,
+                pipelineService = pipelineService
             )
         }
     }

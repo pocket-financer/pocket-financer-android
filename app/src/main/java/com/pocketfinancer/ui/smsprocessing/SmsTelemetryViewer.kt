@@ -513,11 +513,11 @@ private fun PipelineTimeline(
         }
 
         val stage1Done = if (active) {
-            model.activeStageIndex >= if (model.hasThinkingMode) 1 else 2
+            model.activeStageIndex >= 1
         } else {
             settledFacts.upstreamCompleted || automaticInferenceRejected
         }
-        val stage1Active = active && model.activeStageIndex == 1 && !stage1Done
+        val stage1Active = active && model.activeStageIndex == 0 && !stage1Done
         TimelineStage(
             title = "Stage 2: KV Cache & Prompt Prep",
             statusLabel = when {
@@ -553,18 +553,16 @@ private fun PipelineTimeline(
         }
 
         val stage2Done = if (active) {
-            model.activeStageIndex > 2
+            model.activeStageIndex > 1
         } else {
             settledFacts.upstreamCompleted || automaticInferenceRejected
         }
-        val stage2Active = active && model.activeStageIndex in 1..2
+        val stage2Active = active && model.activeStageIndex == 1
         TimelineStage(
-            title = "Stage 3: Local SLM Inference Execution",
+            title = "Stage 3: Grounded candidate selection",
             statusLabel = when {
-                stage2Done -> "Inference Complete"
-                stage2Active && model.activeStageIndex == 1 &&
-                    model.hasThinkingMode -> "Phase 1: Thinking Pass"
-                stage2Active -> "Phase 2: Structured JSON"
+                stage2Done -> "Selection complete"
+                stage2Active -> "Selecting grounded result"
                 settledFacts.upstreamUnavailable -> "Details unavailable"
                 error -> "Status unavailable"
                 filtered -> "No transaction"
@@ -582,33 +580,18 @@ private fun PipelineTimeline(
                 onExpandedStageChange(if (expandedStage == 2) null else 2)
             }
         ) {
-            if (
-                model.hasThinkingMode &&
-                (
-                    model.thinkingOutput.isNotEmpty() ||
-                        (stage2Active && model.activeStageIndex == 1)
-                    )
-            ) {
-                OutputBox(
-                    title = "Thinking Output (<think> block)",
-                    content = model.thinkingOutput
-                        .ifEmpty { "Waiting for thinking tokens…" }
-                        .withLiveOutputTruncationNotice(
-                            model.thinkingOutputTruncated
-                        )
-                )
-            }
             OutputBox(
-                title = "Raw JSON Output",
-                content = model.jsonOutput
-                    .ifEmpty {
-                        if (stage2Active && model.activeStageIndex == 2) {
-                            "Streaming JSON output…"
-                        } else {
-                            "Waiting for JSON output…"
-                        }
-                    }
-                    .withLiveOutputTruncationNotice(model.jsonOutputTruncated)
+                title = "Live model output",
+                content = model.cumulativeStructuredOutput
+                    .ifEmpty { "Waiting for model output…" }
+                    .withLiveOutputTruncationNotice(
+                        model.jsonOutputTruncated
+                    )
+            )
+            OutputBox(
+                title = "Decision Trace",
+                content = "The durable analyzer, selector validation, reconstruction, " +
+                    "account-resolution, and gate trace is available from Saved alert reviews."
             )
         }
 
@@ -683,9 +666,8 @@ private fun RuntimeFactsCard(facts: SmsTelemetryRuntimeFacts) {
                 value = if (facts.grammarEnabled) "Enabled" else "Disabled"
             )
             RuntimeFactRow(
-                label = "Token budgets",
-                value = "${facts.thinkingTokenBudget} thinking • " +
-                    "${facts.answerTokenBudget} answer"
+                label = "Answer token limit",
+                value = facts.answerTokenBudget.toString()
             )
             RuntimeFactRow(
                 label = "Prompt evaluation",

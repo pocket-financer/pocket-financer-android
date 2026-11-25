@@ -66,8 +66,6 @@ class DefaultSlmModelStorage @Inject constructor(
             append(spec.numThreads)
             append('|')
             append(spec.hasFp16)
-            append('|')
-            append(spec.hasThinkingMode)
         }
         return "${File(spec.modelPath).name}_${sha256(exactIdentity).take(16)}"
     }

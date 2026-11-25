@@ -4,6 +4,9 @@ import com.pocketfinancer.data.db.AppDatabase
 import com.pocketfinancer.data.db.dao.QueuedSmsCandidateDao
 import com.pocketfinancer.data.db.dao.TransactionDao
 import com.pocketfinancer.data.db.entity.TransactionEntity
+import com.pocketfinancer.data.db.entity.LegacyTransactionSnapshotEntity
+import com.pocketfinancer.data.db.entity.SmsUserFeedbackEventEntity
+import com.pocketfinancer.data.db.entity.TransactionRevisionEntity
 import com.pocketfinancer.data.model.SmsSourceIdentity
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
@@ -13,8 +16,11 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
+import java.math.BigDecimal
+import java.math.RoundingMode
 import javax.inject.Inject
 import javax.inject.Singleton
+import org.json.JSONObject
 
 @Singleton
 class TransactionRepository @Inject constructor(
@@ -23,6 +29,24 @@ class TransactionRepository @Inject constructor(
     private val accountRepository: AccountRepository,
     private val candidateDao: QueuedSmsCandidateDao
 ) {
+
+    data class ProjectionEditCommand(
+        val actionId: String,
+        val transactionId: String,
+        val expectedRevisionId: String?,
+        val amountText: String,
+        val currencyCode: String,
+        val merchant: String,
+        val type: TransactionType,
+        val accountId: String
+    )
+
+    data class ProjectionEditReceipt(
+        val actionId: String,
+        val transaction: Transaction,
+        val resultingRevision: Long,
+        val replayed: Boolean
+    )
 
     suspend fun clearDatabase() {
         appDatabase.clearAllTables()
@@ -44,9 +68,7 @@ class TransactionRepository @Inject constructor(
         source: () -> Flow<List<TransactionEntity>>
     ): Flow<List<Transaction>> = flow {
         accountRepository.ensureInitialConsolidation()
-        emitAll(
-            source().map { list -> list.map { it.toDomain() } }
-        )
+        emitAll(source().map { list -> list.map { it.toDomain() } })
     }
 
     /**
@@ -138,6 +160,194 @@ class TransactionRepository @Inject constructor(
         }
     }
 
+    /**
+     * Applies a user-authorized ledger correction as one append-only feedback
+     * event plus one immutable transaction revision. The mutable transaction
+     * row is only the current projection of that history.
+     */
+    suspend fun editProjection(command: ProjectionEditCommand): ProjectionEditReceipt =
+        appDatabase.withTransaction {
+            require(UUID.fromString(command.actionId).toString() == command.actionId.lowercase())
+            val processingDao = appDatabase.smsProcessingDao()
+            val revisionDao = appDatabase.transactionRevisionDao()
+            processingDao.getFeedbackByAction(command.actionId)?.let { replay ->
+                check(replay.transactionId == command.transactionId) {
+                    "Feedback action belongs to another transaction"
+                }
+                val replayTransaction = transactionDao.getById(command.transactionId)
+                    ?: error("Edited transaction disappeared")
+                return@withTransaction ProjectionEditReceipt(
+                    command.actionId,
+                    replayTransaction.toDomain(),
+                    replay.resultingReviewRevision,
+                    replayed = true
+                )
+            }
+
+            val existing = transactionDao.getById(command.transactionId)
+                ?: throw IllegalArgumentException("Transaction does not exist")
+            check(existing.currentRevisionId == command.expectedRevisionId) {
+                "Transaction revision conflict"
+            }
+            check(accountRepository.getById(command.accountId) != null) {
+                "Selected account does not exist"
+            }
+            val currency = command.currencyCode.trim().uppercase()
+            val scale = CurrencyScaleRegistry.scale(currency)
+                ?: throw IllegalArgumentException("Unsupported currency")
+            val decimal = BigDecimal(command.amountText.trim())
+                .setScale(scale, RoundingMode.UNNECESSARY)
+            val minorUnits = decimal.movePointRight(scale).longValueExact()
+            require(minorUnits > 0) { "Amount must be positive" }
+            val merchant = command.merchant.trim()
+            require(merchant.isNotEmpty()) { "Merchant must not be blank" }
+            val now = System.currentTimeMillis()
+            val sourceId = existing.sourceId ?: existing.sourceMessageId
+            val stableEventId = existing.sourceEventId ?: existing.id
+
+            var history = revisionDao.getHistory(existing.id)
+            if (history.isEmpty()) {
+                val baselineId = UUID.randomUUID().toString()
+                revisionDao.insertLegacySnapshot(
+                    LegacyTransactionSnapshotEntity(
+                        transactionId = existing.id,
+                        legacyAmount = existing.amount,
+                        merchant = existing.merchant,
+                        occurredAt = existing.date,
+                        direction = existing.type,
+                        accountId = existing.accountId,
+                        rawMessage = existing.rawMessage,
+                        sender = existing.sender,
+                        wasEdited = existing.isEdited,
+                        originalEditHistoryKnown = false,
+                        capturedAt = now
+                    )
+                )
+                revisionDao.insertRevision(
+                    TransactionRevisionEntity(
+                        id = baselineId,
+                        transactionId = existing.id,
+                        sourceId = sourceId,
+                        stableEventId = stableEventId,
+                        revision = 0,
+                        previousRevisionId = null,
+                        operationId = null,
+                        feedbackActionId = null,
+                        exactMinorUnits = existing.exactMinorUnits,
+                        currencyCode = existing.currencyCode,
+                        currencyScale = existing.currencyScale,
+                        direction = existing.type,
+                        merchant = existing.merchant,
+                        accountId = existing.accountId,
+                        occurredAt = existing.date,
+                        provenance = "legacy_current_state_original_history_unknown",
+                        isCurrentProjection = true,
+                        createdAt = now
+                    )
+                )
+                history = revisionDao.getHistory(existing.id)
+            }
+            val current = history.singleOrNull { it.isCurrentProjection }
+                ?: error("Transaction history has no unique current projection")
+            check(existing.currentRevisionId == null || existing.currentRevisionId == current.id) {
+                "Transaction projection and revision history disagree"
+            }
+            val revisionNumber = (history.maxOfOrNull { it.revision } ?: -1) + 1
+            val revisionId = UUID.randomUUID().toString()
+            val corrections = correctionJson(
+                existing = existing,
+                amountMinorUnits = minorUnits,
+                currency = currency,
+                merchant = merchant,
+                type = command.type,
+                accountId = command.accountId,
+                previousRevisionId = current.id
+            )
+            require(corrections != "[]") { "No transaction fields changed" }
+            val previousHash = processingDao.getLatestTransactionFeedback(existing.id)?.eventHash
+            val eventHash = SmsProcessingStore.sha256(
+                canonicalProjectionFeedback(
+                    command,
+                    revisionId,
+                    revisionNumber,
+                    corrections,
+                    previousHash
+                )
+            )
+            val updated = existing.copy(
+                amount = decimal.toDouble(),
+                merchant = merchant,
+                type = command.type.name.lowercase(),
+                accountId = command.accountId,
+                isEdited = true,
+                updatedAt = now,
+                sourceId = sourceId,
+                sourceEventId = stableEventId,
+                exactMinorUnits = minorUnits,
+                currencyCode = currency,
+                currencyScale = scale,
+                currencyProvenance = "user_confirmed",
+                timestampProvenance = existing.timestampProvenance ?: "legacy_stored_time",
+                currentRevisionId = revisionId,
+                projectionState = "current",
+                legacyPrecisionStatus = "exact_minor_units"
+            )
+            revisionDao.clearCurrentProjection(existing.id)
+            revisionDao.insertRevision(
+                TransactionRevisionEntity(
+                    id = revisionId,
+                    transactionId = existing.id,
+                    sourceId = sourceId,
+                    stableEventId = stableEventId,
+                    revision = revisionNumber,
+                    previousRevisionId = current.id,
+                    operationId = null,
+                    feedbackActionId = command.actionId,
+                    exactMinorUnits = minorUnits,
+                    currencyCode = currency,
+                    currencyScale = scale,
+                    direction = command.type.name.lowercase(),
+                    merchant = merchant,
+                    accountId = command.accountId,
+                    occurredAt = existing.date,
+                    provenance = "user_corrected_projection",
+                    isCurrentProjection = true,
+                    createdAt = now
+                )
+            )
+            check(transactionDao.update(updated) == 1) { "Transaction projection disappeared" }
+            check(
+                processingDao.insertFeedbackEvent(
+                    SmsUserFeedbackEventEntity(
+                        actionId = command.actionId,
+                        reviewCaseId = null,
+                        operationId = null,
+                        transactionId = existing.id,
+                        transactionRevisionId = revisionId,
+                        expectedReviewRevision = current.revision,
+                        resultingReviewRevision = revisionNumber,
+                        action = "correct",
+                        actorClass = "user",
+                        actorIdHash = SmsProcessingStore.sha256("local-owner"),
+                        correctionsJson = corrections,
+                        retryConfiguration = null,
+                        canonicalLabelId = null,
+                        canonicalLabelRevision = null,
+                        previousEventHash = previousHash,
+                        eventHash = eventHash,
+                        createdAt = now
+                    )
+                ) != -1L
+            ) { "Feedback action conflict" }
+            ProjectionEditReceipt(
+                command.actionId,
+                updated.toDomain(),
+                revisionNumber,
+                replayed = false
+            )
+        }
+
+    @Deprecated("Use editProjection so every correction has append-only history")
     suspend fun updateTransaction(
         id: String,
         amount: Double,
@@ -146,16 +356,18 @@ class TransactionRepository @Inject constructor(
         accountId: String
     ): Transaction? {
         val existing = transactionDao.getById(id) ?: return null
-        val updatedEntity = existing.copy(
-            amount = amount,
-            merchant = merchant,
-            type = type.name.lowercase(),
-            accountId = accountId,
-            isEdited = true,
-            updatedAt = System.currentTimeMillis()
-        )
-        transactionDao.update(updatedEntity)
-        return updatedEntity.toDomain()
+        return editProjection(
+            ProjectionEditCommand(
+                actionId = UUID.randomUUID().toString(),
+                transactionId = id,
+                expectedRevisionId = existing.currentRevisionId,
+                amountText = BigDecimal.valueOf(amount).stripTrailingZeros().toPlainString(),
+                currencyCode = existing.currencyCode ?: "INR",
+                merchant = merchant,
+                type = type,
+                accountId = accountId
+            )
+        ).transaction
     }
 
     suspend fun sumDebitsSince(sinceMs: Long): Double =
@@ -249,9 +461,68 @@ class TransactionRepository @Inject constructor(
                 fallbackFingerprint = sourceFingerprint,
                 providerMessageId = sourceProviderMessageId,
                 alternateFingerprint = sourceAlternateFingerprint
-            )
+            ),
+            exactMinorUnits = exactMinorUnits,
+            currencyCode = currencyCode,
+            currencyScale = currencyScale,
+            currentRevisionId = currentRevisionId,
+            legacyPrecisionStatus = legacyPrecisionStatus
         )
     }
+
+    private fun correctionJson(
+        existing: TransactionEntity,
+        amountMinorUnits: Long,
+        currency: String,
+        merchant: String,
+        type: TransactionType,
+        accountId: String,
+        previousRevisionId: String
+    ): String {
+        val values = buildList {
+            if (existing.exactMinorUnits != amountMinorUnits) {
+                add("amount_minor_units" to amountMinorUnits.toString())
+            }
+            if (existing.currencyCode?.uppercase() != currency) {
+                add("currency" to JSONObject.quote(currency))
+            }
+            if (existing.merchant != merchant) {
+                add("counterparty" to JSONObject.quote(merchant))
+            }
+            if (existing.type != type.name.lowercase()) {
+                add("direction" to JSONObject.quote(type.name.lowercase()))
+            }
+            if (existing.accountId != accountId) {
+                add("account_id" to JSONObject.quote(accountId))
+            }
+        }
+        return values.joinToString(prefix = "[", postfix = "]", separator = ",") { (field, value) ->
+            "{" +
+                "\"candidate_id\":null," +
+                "\"classification\":\"supplied_manual_ungrounded_value\"," +
+                "\"evidence\":null," +
+                "\"field\":${JSONObject.quote(field)}," +
+                "\"new_value\":$value," +
+                "\"previous_revision_id\":${JSONObject.quote(previousRevisionId)}}"
+        }
+    }
+
+    private fun canonicalProjectionFeedback(
+        command: ProjectionEditCommand,
+        revisionId: String,
+        resultingRevision: Long,
+        correctionsJson: String,
+        previousHash: String?
+    ): String = "{" +
+        "\"action\":\"correct\"," +
+        "\"action_id\":${JSONObject.quote(command.actionId)}," +
+        "\"corrections\":$correctionsJson," +
+        "\"expected_revision_id\":" +
+        "${command.expectedRevisionId?.let(JSONObject::quote) ?: "null"}," +
+        "\"previous_event_hash\":${previousHash?.let(JSONObject::quote) ?: "null"}," +
+        "\"resulting_revision\":$resultingRevision," +
+        "\"transaction_id\":${JSONObject.quote(command.transactionId)}," +
+        "\"transaction_revision_id\":${JSONObject.quote(revisionId)}}"
 
     data class InsertResult(
         val transaction: Transaction,

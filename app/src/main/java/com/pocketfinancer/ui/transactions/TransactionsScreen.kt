@@ -42,6 +42,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketfinancer.data.model.Transaction
 import com.pocketfinancer.data.model.TransactionType
 import com.pocketfinancer.data.model.Account
+import com.pocketfinancer.data.repository.CurrencyScaleRegistry
 import com.pocketfinancer.ui.home.HomeSyncState
 import com.pocketfinancer.ui.home.collectSensitiveManualState
 import com.pocketfinancer.ui.smsprocessing.SmsPipelineActivityCard
@@ -51,6 +52,7 @@ import com.pocketfinancer.ui.smsprocessing.SmsStopUiState
 import com.pocketfinancer.ui.smsprocessing.SmsTelemetryBottomSheet
 import com.pocketfinancer.ui.smsprocessing.SmsTelemetryPresenter
 import com.pocketfinancer.ui.smsprocessing.activeSmsPipelineItem
+import com.pocketfinancer.ui.smsprocessing.formatGroundedSelectorOutput
 import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import com.pocketfinancer.ui.smsprocessing.smsPipelineCardItem
 import com.pocketfinancer.ui.smsprocessing.toSmsPipelineCardUiModel
@@ -59,10 +61,22 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.flow.StateFlow
 
+private fun nativeStageLabel(state: String): String = when (state) {
+    "ready" -> "Alert saved"
+    "claimed", "analysis_started", "analyzed" -> "Inspecting message"
+    "selector_started" -> "Running on-device AI"
+    "selector_completed", "validated" -> "Validating details"
+    "reconstructed" -> "Matching account"
+    "retained_for_review" -> "Ready for review"
+    "interrupted" -> "Interrupted — retry available"
+    else -> "Processing locally"
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TransactionsScreen(
     onNavigateToTab: (String) -> Unit = {},
+    onOpenReview: (String) -> Unit = {},
     viewModel: TransactionsViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -84,6 +98,7 @@ fun TransactionsScreen(
             focusRequester.requestFocus()
         }
     }
+    LaunchedEffect(Unit) { viewModel.refreshNativeWork() }
 
     Box(
         modifier = Modifier
@@ -194,6 +209,17 @@ fun TransactionsScreen(
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        IconButton(
+                            onClick = { onNavigateToTab("reviews") },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.FactCheck,
+                                contentDescription = "Review saved alerts",
+                                tint = M3_OnSurfaceVariant,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
                         IconButton(
                             onClick = { isSearching = true },
                             modifier = Modifier.size(40.dp)
@@ -379,7 +405,9 @@ fun TransactionsScreen(
             }
 
             val pipelineCard = renderedManualSyncState.toSmsPipelineCardUiModel()
-            val showEmptyState = shouldShowTransactionsEmptyState(
+            val hasNativeWork =
+                state.processingOperations.isNotEmpty() || state.reviewCases.isNotEmpty()
+            val showEmptyState = !hasNativeWork && shouldShowTransactionsEmptyState(
                 hasTransactions = state.transactions.isNotEmpty(),
                 hasSyncCard = pipelineCard != null,
                 syncStatus = renderedManualSyncState.status
@@ -404,6 +432,67 @@ fun TransactionsScreen(
                         .fillMaxSize()
                         .weight(1f)
                 ) {
+                    if (state.processingOperations.isNotEmpty()) {
+                        item(key = "native-processing-header") {
+                            Text(
+                                "Processing",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                        items(
+                            count = state.processingOperations.size,
+                            key = { index -> state.processingOperations[index].id }
+                        ) { index ->
+                            val operation = state.processingOperations[index]
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                                colors = CardDefaults.cardColors(containerColor = M3_SurfaceContainerLow)
+                            ) {
+                                Column(Modifier.padding(16.dp)) {
+                                    Text(nativeStageLabel(operation.state), fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "Saved locally · on-device processing",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = M3_OnSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (state.reviewCases.isNotEmpty()) {
+                        item(key = "native-review-header") {
+                            Text(
+                                "Needs Review",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                        items(
+                            count = state.reviewCases.size,
+                            key = { index -> state.reviewCases[index].id }
+                        ) { index ->
+                            val review = state.reviewCases[index]
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                                    .clickable { onOpenReview(review.id) },
+                                colors = CardDefaults.cardColors(containerColor = M3_SecondaryContainer)
+                            ) {
+                                Column(Modifier.padding(16.dp)) {
+                                    Text("Review extracted transaction", fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "Tap to verify source evidence · revision ${review.revision}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = M3_OnSecondaryContainer
+                                    )
+                                }
+                            }
+                        }
+                    }
                     pipelineCard?.let { model ->
                         item(key = "manual-sms-pipeline") {
                             SmsPipelineActivityCard(
@@ -499,9 +588,13 @@ fun TransactionsScreen(
 
             var editAmount by remember(tx.id) { mutableStateOf(tx.amount.toString()) }
             var editMerchant by remember(tx.id) { mutableStateOf(tx.merchant) }
-            var editAccountName by remember(tx.id) { mutableStateOf(tx.accountLabel ?: "") }
+            var editAccountId by remember(tx.id) { mutableStateOf(tx.accountId) }
+            var editCurrency by remember(tx.id) { mutableStateOf(tx.currencyCode ?: "INR") }
             var editType by remember(tx.id) { mutableStateOf(tx.type) }
             var typeDropdownExpanded by remember { mutableStateOf(false) }
+            var accountDropdownExpanded by remember { mutableStateOf(false) }
+            var currencyDropdownExpanded by remember { mutableStateOf(false) }
+            var editError by remember(tx.id) { mutableStateOf<String?>(null) }
 
             ModalBottomSheet(
                 onDismissRequest = { viewModel.selectTransaction(null) },
@@ -861,7 +954,7 @@ fun TransactionsScreen(
                         OutlinedTextField(
                             value = editAmount,
                             onValueChange = { editAmount = it },
-                            label = { Text("Amount (₹)") },
+                            label = { Text("Amount ($editCurrency)") },
                             singleLine = true,
                             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                                 keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal
@@ -878,22 +971,84 @@ fun TransactionsScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        OutlinedTextField(
-                            value = editAccountName,
-                            onValueChange = { editAccountName = it },
-                            label = { Text("Account / Card Name") },
-                            singleLine = true,
-                            placeholder = { Text("e.g. A/c XX1234") },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = M3_Primary,
-                                unfocusedBorderColor = M3_OutlineVariant,
-                                focusedLabelColor = M3_Primary,
-                                unfocusedLabelColor = M3_OnSurfaceVariant,
-                                focusedTextColor = M3_OnSurface,
-                                unfocusedTextColor = M3_OnSurface
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = editCurrency,
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("Currency") },
+                                trailingIcon = {
+                                    IconButton(
+                                        onClick = {
+                                            currencyDropdownExpanded =
+                                                !currencyDropdownExpanded
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        currencyDropdownExpanded = !currencyDropdownExpanded
+                                    }
                             )
-                        )
+                            DropdownMenu(
+                                expanded = currencyDropdownExpanded,
+                                onDismissRequest = { currencyDropdownExpanded = false }
+                            ) {
+                                CurrencyScaleRegistry.supportedCodes.forEach { code ->
+                                    DropdownMenuItem(
+                                        text = { Text(code) },
+                                        onClick = {
+                                            editCurrency = code
+                                            currencyDropdownExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            val selectedAccount = state.accounts.firstOrNull {
+                                it.id == editAccountId
+                            }
+                            OutlinedTextField(
+                                value = selectedAccount?.name ?: "Select an existing account",
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("Owned account / card") },
+                                trailingIcon = {
+                                    IconButton(
+                                        onClick = {
+                                            accountDropdownExpanded = !accountDropdownExpanded
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        accountDropdownExpanded = !accountDropdownExpanded
+                                    }
+                            )
+                            DropdownMenu(
+                                expanded = accountDropdownExpanded,
+                                onDismissRequest = { accountDropdownExpanded = false }
+                            ) {
+                                state.accounts.forEach { account ->
+                                    DropdownMenuItem(
+                                        text = { Text(account.name) },
+                                        onClick = {
+                                            editAccountId = account.id
+                                            accountDropdownExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Box(modifier = Modifier.fillMaxWidth()) {
@@ -946,6 +1101,15 @@ fun TransactionsScreen(
                         }
                         Spacer(modifier = Modifier.height(20.dp))
 
+                        editError?.let { message ->
+                            Text(
+                                text = message,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -963,15 +1127,25 @@ fun TransactionsScreen(
                             }
                             Button(
                                 onClick = {
-                                    val parsedAmount = editAmount.toDoubleOrNull() ?: 0.0
+                                    editError = null
                                     viewModel.updateTransaction(
                                         id = tx.id,
-                                        amount = parsedAmount,
+                                        expectedRevisionId = tx.currentRevisionId,
+                                        amountText = editAmount,
+                                        currencyCode = editCurrency,
                                         merchant = editMerchant,
                                         type = editType,
-                                        accountName = editAccountName
+                                        accountId = editAccountId,
+                                        onResult = { saved ->
+                                            if (saved) {
+                                                isEditing = false
+                                            } else {
+                                                editError =
+                                                    "Could not save this correction. " +
+                                                    "Check the amount and account, then retry."
+                                            }
+                                        }
                                     )
-                                    isEditing = false
                                 },
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(12.dp),
@@ -1145,7 +1319,7 @@ private fun TransactionsManualTelemetrySheet(
             filterLogs = filterLogs,
             cacheLogs = cacheLogs,
             slmPrompt = slmPrompt,
-            parseJson = viewModel::getParsedOutput,
+            parseJson = ::formatGroundedSelectorOutput,
             target = requestedTarget
         )
     } else {

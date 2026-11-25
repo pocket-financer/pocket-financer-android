@@ -18,7 +18,12 @@ data class Transaction(
     val slmEvalMs: Long? = null,
     val slmNumTokens: Int? = null,
     val slmModelName: String? = null,
-    val sourceIdentity: SmsSourceIdentity? = null
+    val sourceIdentity: SmsSourceIdentity? = null,
+    val exactMinorUnits: Long? = null,
+    val currencyCode: String? = null,
+    val currencyScale: Int? = null,
+    val currentRevisionId: String? = null,
+    val legacyPrecisionStatus: String = "legacy_double_original_precision_unknown"
 )
 
 enum class TransactionType {

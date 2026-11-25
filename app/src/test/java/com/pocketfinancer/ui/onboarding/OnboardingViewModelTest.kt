@@ -4,6 +4,7 @@ import com.pocketfinancer.setup.FakeSharedPreferences
 import com.pocketfinancer.setup.SetupImportStatus
 import com.pocketfinancer.setup.SetupImportStore
 import com.pocketfinancer.sms.SmsRepository
+import com.pocketfinancer.data.repository.ProcessingConfigurationRepository
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertEquals
@@ -22,9 +23,13 @@ class OnboardingViewModelTest {
             fake.preferences,
             hasSmsPermissions = true
         )
-        val viewModel = OnboardingViewModel(repository, store)
+        val configuration = mockk<ProcessingConfigurationRepository>()
+        every { configuration.confirmedPrimaryCurrency() } returns null
+        every { configuration.confirmPrimaryCurrency("INR") } returns Unit
+        val viewModel = OnboardingViewModel(repository, store, configuration)
 
-        viewModel.setStep(OnboardingStep.PERMISSIONS)
+        viewModel.setStep(OnboardingStep.PRIMARY_CURRENCY)
+        viewModel.confirmPrimaryCurrency()
         viewModel.onPermissionResult(granted = true)
 
         assertEquals(OnboardingStep.COMPLETED, viewModel.state.value.step)
@@ -45,7 +50,9 @@ class OnboardingViewModelTest {
             hasSmsPermissions = true
         )
         store.beginLocalFinancialErase(nextRunGeneration = 1L)
-        val viewModel = OnboardingViewModel(repository, store)
+        val configuration = mockk<ProcessingConfigurationRepository>()
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        val viewModel = OnboardingViewModel(repository, store, configuration)
 
         viewModel.setStep(OnboardingStep.PERMISSIONS)
 

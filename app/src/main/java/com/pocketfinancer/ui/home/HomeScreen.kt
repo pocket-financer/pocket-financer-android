@@ -60,6 +60,7 @@ import com.pocketfinancer.ui.smsprocessing.SmsStopUiState
 import com.pocketfinancer.ui.smsprocessing.SmsTelemetryBottomSheet
 import com.pocketfinancer.ui.smsprocessing.SmsTelemetryPresenter
 import com.pocketfinancer.ui.smsprocessing.activeSmsPipelineItem
+import com.pocketfinancer.ui.smsprocessing.formatGroundedSelectorOutput
 import com.pocketfinancer.ui.smsprocessing.historicalSmsPipelineGapUiModel
 import com.pocketfinancer.ui.smsprocessing.ownsManualProcessingTarget
 import com.pocketfinancer.ui.smsprocessing.ownsAutomaticProcessingTarget
@@ -227,6 +228,7 @@ fun HomeScreen(
 
     val runSetupAction: (SetupCardAction) -> Unit = { action ->
         when (action.target()) {
+            SetupCardActionTarget.OPEN_REVIEWS -> onNavigateToTab("reviews")
             SetupCardActionTarget.SCAN_OLDER ->
                 viewModel.scanOlderMessages()
             SetupCardActionTarget.RETRY_RECENT_SYNC ->
@@ -278,6 +280,7 @@ fun HomeScreen(
 
     val onSetupAction: (SetupCardAction) -> Unit = { action ->
         when (action) {
+            SetupCardAction.OPEN_REVIEWS -> runSetupAction(action)
             SetupCardAction.RESTORE_PERMISSION -> {
                 smsPermissionLauncher.launch(
                     arrayOf(
@@ -1097,7 +1100,7 @@ private fun HomeManualTelemetrySheet(
             filterLogs = filterLogs,
             cacheLogs = cacheLogs,
             slmPrompt = slmPrompt,
-            parseJson = viewModel::getParsedOutput,
+            parseJson = ::formatGroundedSelectorOutput,
             target = requestedTarget
         )
     } else {
@@ -1210,7 +1213,7 @@ private fun HomeAutomaticTelemetrySheet(
         activity = activity,
         filterLogs = filterLogs,
         slmPrompt = slmPrompt,
-        parseJson = viewModel::getParsedOutput,
+        parseJson = ::formatGroundedSelectorOutput,
         target = requestedTarget
     )
 
@@ -1283,7 +1286,7 @@ private fun HomeHistoricalTelemetrySheet(
             runId = requestedTarget.runId,
             filterLogs = historicalFilterLogs,
             slmPrompt = historicalPrompt,
-            parseJson = viewModel::getParsedOutput,
+            parseJson = ::formatGroundedSelectorOutput,
             stopState = stopState
         )
     } else {

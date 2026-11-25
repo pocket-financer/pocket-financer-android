@@ -47,6 +47,12 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getById(id: String): TransactionEntity?
 
+    @Query("SELECT * FROM transactions WHERE sourceId = :sourceId AND sourceEventId = :eventId LIMIT 1")
+    suspend fun getBySourceEvent(sourceId: String, eventId: String): TransactionEntity?
+
+    @Query("SELECT * FROM transactions WHERE sourceId = :sourceId ORDER BY date, id")
+    suspend fun getAllBySource(sourceId: String): List<TransactionEntity>
+
     @Query(
         """
         SELECT * FROM transactions
@@ -189,4 +195,32 @@ interface TransactionDao {
 
     @Query("UPDATE transactions SET accountId = :newAccountId WHERE accountId = :oldAccountId")
     suspend fun updateTransactionsAccount(oldAccountId: String, newAccountId: String)
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM transactions AS tx
+        WHERE tx.accountId = :accountId
+          AND tx.type = :direction
+          AND tx.exactMinorUnits = :minorUnits
+          AND tx.currencyCode = :currency
+          AND ABS(tx.date - :occurredAtEpochMs) <= :windowMs
+          AND (:excludeSourceId IS NULL OR tx.sourceId IS NULL OR tx.sourceId != :excludeSourceId)
+          AND (:excludeOperationId IS NULL OR NOT EXISTS (
+              SELECT 1 FROM transaction_revisions AS rev
+              WHERE rev.transactionId = tx.id
+                AND rev.isCurrentProjection = 1
+                AND rev.operationId = :excludeOperationId
+          ))
+        """
+    )
+    suspend fun countMatchingTransactionsInWindow(
+        accountId: String,
+        direction: String,
+        minorUnits: Long,
+        currency: String,
+        occurredAtEpochMs: Long,
+        windowMs: Long,
+        excludeSourceId: String?,
+        excludeOperationId: String?
+    ): Int
 }

@@ -1,5 +1,0 @@
-{
-  "name": "pocketFinancer",
-  "description": "A personal finance app that tracks expenses by parsing transactional SMS messages.",
-  "requestFramePermissions": []
-}

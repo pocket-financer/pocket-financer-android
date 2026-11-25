@@ -4,22 +4,14 @@ import android.content.Context
 import android.util.Log
 import com.pocketfinancer.SlmAppFlowCoordinator
 import com.pocketfinancer.SlmAppFlowLease
-import com.pocketfinancer.data.repository.AccountRepository
 import com.pocketfinancer.data.model.SmsSourceIdentity
-import com.pocketfinancer.data.repository.TransactionRepository
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.resolveActiveSlmTier
-import com.pocketfinancer.inference.SlmChatMessage
-import com.pocketfinancer.inference.SlmExtractionRequest
-import com.pocketfinancer.inference.SlmExtractionResult
 import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmRuntime
 import com.pocketfinancer.inference.SlmRuntimeOwner
-import com.pocketfinancer.pipeline.ExtractionParser
-import com.pocketfinancer.pipeline.PromptBuilder
-import com.pocketfinancer.pipeline.SlmProcessingPreferences
-import com.pocketfinancer.pipeline.SmsFilterPipeline
+import com.pocketfinancer.pipeline.PipelineService
 import com.pocketfinancer.setup.AdaptiveHistoryScanPolicy
 import com.pocketfinancer.setup.SetupActionableError
 import com.pocketfinancer.setup.SetupImportState
@@ -30,6 +22,7 @@ import com.pocketfinancer.toModelSpec
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -56,11 +49,12 @@ data class SyncSmsItem(
     val body: String,
     val date: Long,
     val messageType: Int = 1,
+    val sourceTimestamp: Long = date,
     val sourceIdentity: SmsSourceIdentity = SmsSourceIdentity.androidSms(
         providerMessageId = null,
         sender = sender,
         body = body,
-        sourceTimestamp = date,
+        sourceTimestamp = sourceTimestamp,
         messageType = messageType
     ),
     var status: String,
@@ -108,104 +102,68 @@ internal fun SyncSmsItem.hasDiagnosticSourceEvidence(): Boolean =
     status !in SOURCE_EVIDENCE_DISCARDED_STATUSES &&
         body.isNotBlank()
 
-/**
- * Provider ids are authoritative when both sides have them. Fingerprints are
- * only a bridge for a provider-less broadcast meeting its later provider row;
- * using them between two provider rows would collapse legitimate identical
- * messages that have distinct Android `_id` values.
- */
+/** Content/time fingerprints never establish queue identity. */
 internal fun sameQueuedSmsSource(
     first: SmsSourceIdentity,
     second: SmsSourceIdentity
-): Boolean {
-    if (first.connector != second.connector) return false
-    if (first.messageId == second.messageId) return true
-    if (
-        first.providerMessageId != null &&
-        second.providerMessageId != null
-    ) {
-        return false
-    }
-    val firstFingerprints = setOfNotNull(
-        first.fallbackFingerprint,
-        first.alternateFingerprint
-    )
-    val secondFingerprints = setOfNotNull(
-        second.fallbackFingerprint,
-        second.alternateFingerprint
-    )
-    return firstFingerprints.any(secondFingerprints::contains)
-}
+): Boolean = first.connector == second.connector &&
+    first.providerMessageId != null && second.providerMessageId != null &&
+    first.providerMessageId == second.providerMessageId && first.messageId == second.messageId
 
-private fun List<SyncSmsItem>.distinctSmsSources(): List<SyncSmsItem> {
-    // Provider-backed identities are considered first so one ambiguous
-    // provider-less broadcast can bridge to at most one authoritative row,
-    // never collapse two distinct provider rows.
-    val providerBacked = filter {
-        it.sourceIdentity.providerMessageId != null
-    }
-    val providerLess = filter {
-        it.sourceIdentity.providerMessageId == null
-    }
-    return (providerBacked + providerLess)
-        .fold(mutableListOf()) { distinct, item ->
-            if (
-                distinct.none {
-                    sameQueuedSmsSource(
-                        it.sourceIdentity,
-                        item.sourceIdentity
-                    )
-                }
-            ) {
-                distinct += item
-            }
-            distinct
-        }
-}
+internal fun SyncSmsItem.toSourceMessage(): SmsReader.SmsMessage = SmsReader.SmsMessage(
+    address = sender,
+    body = body,
+    date = date,
+    type = messageType,
+    providerMessageId = sourceIdentity.providerMessageId,
+    sourceTimestamp = sourceTimestamp
+)
+
+internal data class RecentScanQueueMerge(
+    val queue: List<SyncSmsItem>,
+    val scannedCandidateKeys: Set<String>
+)
 
 internal fun mergeRecentScanQueue(
     currentQueue: List<SyncSmsItem>,
     providerMessages: List<SmsReader.SmsMessage>
-): List<SyncSmsItem> {
-    val unmatchedCurrent = currentQueue.toMutableList()
-    val scanned = providerMessages.map { message ->
+): List<SyncSmsItem> = mergeRecentScanQueueWithCoverage(currentQueue, providerMessages).queue
+
+internal fun mergeRecentScanQueueWithCoverage(
+    currentQueue: List<SyncSmsItem>,
+    providerMessages: List<SmsReader.SmsMessage>
+): RecentScanQueueMerge {
+    val queued = currentQueue.toMutableList()
+    val scannedKeys = mutableSetOf<String>()
+    for (message in providerMessages) {
         val source = message.sourceIdentity
-        val exactIndex = unmatchedCurrent.indexOfFirst {
-            it.sourceIdentity.connector == source.connector &&
-                it.sourceIdentity.messageId == source.messageId
+        // Preserve the exact queue item/attempt only for trustworthy identity
+        // AND unchanged evidence. Conflicting evidence must reach admission.
+        val existing = queued.firstOrNull {
+            sameQueuedSmsSource(it.sourceIdentity, source) &&
+                it.sourceIdentity == source && it.toSourceMessage() == message
         }
-        val bridgeIndex = if (exactIndex >= 0) {
-            -1
-        } else {
-            unmatchedCurrent.indexOfFirst {
-                sameQueuedSmsSource(it.sourceIdentity, source)
-            }
+        if (existing != null) {
+            scannedKeys += existing.id
+            continue
         }
-        val matchedIndex = exactIndex.takeIf { it >= 0 } ?: bridgeIndex
-        val existing = matchedIndex
-            .takeIf { it >= 0 }
-            ?.let(unmatchedCurrent::removeAt)
-        if (
-            existing != null &&
-            existing.sourceIdentity.providerMessageId != null
-        ) {
-            existing
-        } else {
-            // A provider row enriches the one provider-less queue item it can
-            // unambiguously consume. Its authoritative id then keeps any
-            // second byte-identical provider row distinct.
-            SyncSmsItem(
-                id = source.opaqueCandidateKey,
-                sender = message.address,
-                body = message.body,
-                date = message.date,
-                messageType = message.type,
-                sourceIdentity = source,
-                status = existing?.status ?: "pending"
-            )
-        }
+        val preferredKey = source.opaqueCandidateKey
+        val item = SyncSmsItem(
+            id = if (source.providerMessageId != null && queued.none { it.id == preferredKey }) {
+                preferredKey
+            } else "sms_queue_${UUID.randomUUID()}",
+            sender = message.address,
+            body = message.body,
+            date = message.date,
+            messageType = message.type,
+            sourceTimestamp = message.sourceTimestamp,
+            sourceIdentity = source,
+            status = "pending"
+        )
+        queued += item
+        scannedKeys += item.id
     }
-    return (scanned + unmatchedCurrent).distinctSmsSources()
+    return RecentScanQueueMerge(queued, scannedKeys)
 }
 
 data class HomeSyncState(
@@ -215,10 +173,10 @@ data class HomeSyncState(
     val queue: List<SyncSmsItem> = emptyList(),
     val currentIndex: Int? = null,
     val currentStageIndex: Int? = null,
-    val thinkingOutput: String = "",
+    val decodedTokenDelta: String = "",
     val jsonOutput: String = "",
+    val jsonOutputTruncated: Boolean = false,
     val activeSmsPerformance: String? = null,
-    val hasThinkingMode: Boolean = false,
     val activeModelName: String? = null,
     val recentScanOutcome: RecentScanOutcome = RecentScanOutcome.NOT_RUN,
     val recentScanWindowDays: Int? = null,
@@ -250,21 +208,27 @@ internal data class ManualOperationReservation(
     val kind: ManualOperationReservationKind
 )
 
+internal data class ManualSmsTelemetryOwner(
+    val runId: String?,
+    val candidateKey: String,
+    val attemptToken: String
+) {
+    init {
+        require(candidateKey.isNotBlank())
+        require(attemptToken.isNotBlank())
+    }
+}
+
 @Singleton
 class HomeSyncManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val smsRepository: SmsRepository,
-    private val smsFilterPipeline: SmsFilterPipeline,
-    private val transactionRepository: TransactionRepository,
-    private val accountRepository: AccountRepository,
     private val slmRuntime: SlmRuntime,
     private val appFlowCoordinator: SlmAppFlowCoordinator,
     private val modelStorage: SlmModelStorage,
     private val deviceCapabilities: DeviceCapabilities,
-    private val promptBuilder: PromptBuilder,
-    private val extractionParser: ExtractionParser,
-    private val slmProcessingPreferences: SlmProcessingPreferences,
-    private val setupImportStore: SetupImportStore
+    private val setupImportStore: SetupImportStore,
+    private val pipelineService: PipelineService
 ) {
     private val historyScanPolicy = AdaptiveHistoryScanPolicy()
     /**
@@ -278,6 +242,8 @@ class HomeSyncManager @Inject constructor(
     private val recentScanTrackingLock = Any()
     private val _syncState = MutableStateFlow(HomeSyncState())
     val syncState: StateFlow<HomeSyncState> = _syncState.asStateFlow()
+    private val activeManualSmsTelemetryOwner =
+        AtomicReference<ManualSmsTelemetryOwner?>(null)
     private val _serviceStartAcknowledgement =
         MutableStateFlow<ManualServiceStartAcknowledgement?>(null)
     internal val serviceStartAcknowledgement:
@@ -416,8 +382,9 @@ class HomeSyncManager @Inject constructor(
                     cancellationRequested = false,
                     currentIndex = null,
                     currentStageIndex = null,
-                    thinkingOutput = "",
+                    decodedTokenDelta = "",
                     jsonOutput = "",
+                    jsonOutputTruncated = false,
                     activeSmsPerformance = null,
                     scanError = null,
                     syncError = null
@@ -478,8 +445,9 @@ class HomeSyncManager @Inject constructor(
             val next = current.copy(
                 status = HomeSyncState.Status.CANCELLING,
                 cancellationRequested = true,
-                thinkingOutput = "",
+                decodedTokenDelta = "",
                 jsonOutput = "",
+                jsonOutputTruncated = false,
                 activeSmsPerformance = null
             )
             if (_syncState.compareAndSet(current, next)) return true
@@ -529,8 +497,9 @@ class HomeSyncManager @Inject constructor(
                     .takeUnless { terminalStatus == HomeSyncState.Status.IDLE },
                 currentStageIndex = current.currentStageIndex
                     .takeUnless { terminalStatus == HomeSyncState.Status.IDLE },
-                thinkingOutput = "",
+                decodedTokenDelta = "",
                 jsonOutput = "",
+                jsonOutputTruncated = false,
                 activeSmsPerformance = null
             )
             if (_syncState.compareAndSet(current, finished)) return true
@@ -559,8 +528,9 @@ class HomeSyncManager @Inject constructor(
                 status = HomeSyncState.Status.DONE,
                 currentIndex = null,
                 currentStageIndex = null,
-                thinkingOutput = "",
+                decodedTokenDelta = "",
                 jsonOutput = "",
+                jsonOutputTruncated = false,
                 activeSmsPerformance = null,
                 syncError = null
             )
@@ -608,8 +578,9 @@ class HomeSyncManager @Inject constructor(
                 },
                 currentIndex = null,
                 currentStageIndex = null,
-                thinkingOutput = "",
+                decodedTokenDelta = "",
                 jsonOutput = "",
+                jsonOutputTruncated = false,
                 activeSmsPerformance = null,
                 syncError = null
             )
@@ -714,20 +685,14 @@ class HomeSyncManager @Inject constructor(
                     maxDate = providerMaxDate
                 )
                 ensureRunCanContinue(runId)
-                val transactional = rawMessages.filter { message ->
-                    smsFilterPipeline.isTransactional(
-                        message.address,
-                        message.body
-                    )
-                }
+                // Do not let legacy sender/amount/account/OTP rules reject
+                // messages ahead of the common durable admission boundary.
+                // Terminal conservative exclusions await the retention contract.
                 val unsyncedMessages = mutableListOf<SmsReader.SmsMessage>()
-                for (message in transactional) {
+                for (message in rawMessages) {
                     ensureRunCanContinue(runId)
                     if (
-                        !transactionRepository.preserveSourceMetadataIfExists(
-                            sourceIdentity = message.sourceIdentity,
-                            receivedDate = message.date
-                        )
+                        !pipelineService.hasVerifiedSavedSource(message)
                     ) {
                         unsyncedMessages += message
                     }
@@ -737,16 +702,13 @@ class HomeSyncManager @Inject constructor(
                     publishRecentPermissionNeeded()
                     return@withLock
                 }
-                val scannedCandidateKeys = unsyncedMessages
-                    .mapTo(mutableSetOf()) {
-                        it.sourceIdentity.opaqueCandidateKey
-                    }
+                var scannedCandidateKeys: Set<String> = emptySet()
+                var scanPublished = false
                 val loadedModel = slmRuntime.state.value.loadedModel
                 val completedAt = System.currentTimeMillis()
                 synchronized(recentScanTrackingLock) {
-                    recentScanCandidateKeys = scannedCandidateKeys
-                    recentScanCompletedAtMillis = completedAt
                     _syncState.update { current ->
+                        scanPublished = false
                         if (
                             runId != null &&
                             (
@@ -761,13 +723,15 @@ class HomeSyncManager @Inject constructor(
                             // Build from the queue owned by this exact CAS
                             // retry. Incoming candidates may be appended while
                             // repository identity checks are in flight.
-                            val latestQueue = mergeRecentScanQueue(
+                            val merged = mergeRecentScanQueueWithCoverage(
                                 currentQueue = current.queue.filter {
                                     it.status == "pending" ||
                                         it.status == "syncing"
                                 },
                                 providerMessages = unsyncedMessages
                             )
+                            scannedCandidateKeys = merged.scannedCandidateKeys
+                            scanPublished = true
                             HomeSyncState(
                                 status = if (runId == null) {
                                     HomeSyncState.Status.IDLE
@@ -777,9 +741,7 @@ class HomeSyncManager @Inject constructor(
                                 activeRunId = current.activeRunId,
                                 cancellationRequested =
                                     current.cancellationRequested,
-                                queue = latestQueue,
-                                hasThinkingMode =
-                                    loadedModel?.hasThinkingMode ?: false,
+                                queue = merged.queue,
                                 activeModelName = loadedModel?.modelPath
                                     ?.let { File(it).name },
                                 recentScanOutcome =
@@ -788,6 +750,10 @@ class HomeSyncManager @Inject constructor(
                                 lastSuccessfulScanMillis = completedAt
                             )
                         }
+                    }
+                    if (scanPublished) {
+                        recentScanCandidateKeys = scannedCandidateKeys
+                        recentScanCompletedAtMillis = completedAt
                     }
                 }
                 ensureRunCanContinue(runId)
@@ -1023,10 +989,10 @@ class HomeSyncManager @Inject constructor(
                     status = HomeSyncState.Status.SYNCING,
                     currentIndex = 0,
                     currentStageIndex = 0,
-                    thinkingOutput = "",
+                    decodedTokenDelta = "",
                     jsonOutput = "",
+                    jsonOutputTruncated = false,
                     activeSmsPerformance = null,
-                    hasThinkingMode = spec.hasThinkingMode,
                     activeModelName = modelFile.name
                 )
             }
@@ -1036,10 +1002,6 @@ class HomeSyncManager @Inject constructor(
             val batchLease = slmRuntime.acquire(SlmRuntimeOwner.HOME_SYNC, spec)
             lease = batchLease
             ensureRunCanContinue(runId)
-            val grammar: String by lazy {
-                modelStorage.readTextAsset("sms_extraction.gbnf")
-            }
-
             while (true) {
                 ensureRunCanContinue(runId)
                 val index = _syncState.value.queue.indexOfFirst {
@@ -1082,8 +1044,9 @@ class HomeSyncManager @Inject constructor(
                         queue = queue,
                         currentIndex = index,
                         currentStageIndex = 0,
-                        thinkingOutput = "",
+                        decodedTokenDelta = "",
                         jsonOutput = "",
+                        jsonOutputTruncated = false,
                         activeSmsPerformance = null
                     )
                 }
@@ -1091,83 +1054,84 @@ class HomeSyncManager @Inject constructor(
 
                 val item = _syncState.value.queue[index]
 
-                // Immutable per-SMS preference snapshot. A toggle made while
-                // this request is queued/running applies to the next item.
-                val useGrammar = slmProcessingPreferences.gbnfGrammarEnabled.value
-
-                if (
-                    transactionRepository.preserveSourceMetadataIfExists(
-                        sourceIdentity = item.sourceIdentity,
-                        receivedDate = item.date
-                    )
-                ) {
-                    ensureRunCanContinue(runId)
-                    updateItemStatus(index, "already_saved", runId)
-                    continue
-                }
-                if (!smsFilterPipeline.isTransactional(item.sender, item.body)) {
-                    ensureRunCanContinue(runId)
-                    updateItemStatus(index, "filtered_out", runId)
-                    continue
-                }
-
+                // Normal processing rechecks reliable identity and immutable
+                // evidence atomically; discovery is not permission to settle.
                 try {
-                    val hasThinking = batchLease.model.hasThinkingMode
                     updateRunState(runId) { state ->
-                        state.copy(
-                            currentStageIndex = if (hasThinking) 1 else 2
+                        state.copy(currentStageIndex = 1)
+                    }
+                    ensureRunCanContinue(runId)
+                    val telemetryOwner = ManualSmsTelemetryOwner(
+                        runId = runId,
+                        candidateKey = item.id,
+                        attemptToken = UUID.randomUUID().toString()
+                    )
+                    check(
+                        activeManualSmsTelemetryOwner.compareAndSet(
+                            null,
+                            telemetryOwner
+                        )
+                    ) { "Another manual SMS telemetry attempt is still active" }
+                    val processingObserver = ManualSmsProcessingObserver(
+                        initial = ManualSmsProcessingTelemetry(
+                            stageIndex = 1,
+                            modelName = modelFile.name
+                        ),
+                        publish = { telemetry ->
+                            publishManualSmsTelemetry(
+                                owner = telemetryOwner,
+                                index = index,
+                                telemetry = telemetry
+                            )
+                        }
+                    )
+                    val result = try {
+                        pipelineService.processSingle(
+                            sms = item.toSourceMessage(),
+                            lease = batchLease,
+                            observer = processingObserver,
+                            trigger = "manual"
+                        )
+                    } finally {
+                        processingObserver.close()
+                        clearManualSmsTelemetry(telemetryOwner, index)
+                        activeManualSmsTelemetryOwner.compareAndSet(
+                            telemetryOwner,
+                            null
                         )
                     }
                     ensureRunCanContinue(runId)
-                    val rawPrompt = promptBuilder.buildExtractionPrompt(item.sender, item.body)
-                    val fallbackPrompt =
-                        promptBuilder.buildChatPrompt(rawPrompt, enableThinking = hasThinking)
-
-                    val result = batchLease.extract(
-                        SlmExtractionRequest(
-                            messages = listOf(
-                                SlmChatMessage(
-                                    role = "system",
-                                    content = "You are a helpful financial SMS extraction assistant."
-                                ),
-                                SlmChatMessage(role = "user", content = rawPrompt)
-                            ),
-                            fallbackPrompt = fallbackPrompt,
-                            staticPrefix = promptBuilder.getStaticPrefix(),
-                            grammar = if (useGrammar) grammar else null,
-                            thinkingTokens = 1024,
-                            answerTokens = 256,
-                            thinkingCallback = { token ->
-                                updateRunState(runId) { state ->
-                                    state.copy(
-                                        thinkingOutput =
-                                            state.thinkingOutput + token
-                                    )
-                                }
-                            },
-                            jsonCallback = { token ->
-                                updateRunState(runId) { state ->
-                                    state.copy(
-                                        currentStageIndex = 2,
-                                        jsonOutput = state.jsonOutput + token
-                                    )
-                                }
-                            }
-                        )
-                    )
-                    ensureRunCanContinue(runId)
 
                     when (result) {
-                        is SlmExtractionResult.Success ->
-                            persistSuccessfulExtraction(index, result, runId)
-                        is SlmExtractionResult.Null ->
-                            updateItemStatus(index, "filtered_out", runId)
-                        is SlmExtractionResult.Error -> {
-                            Log.e(TAG, "SLM extraction failed: ${result.message}")
+                        is PipelineService.ProcessingResult.Saved ->
+                            updateItemStatus(
+                                index,
+                                if (result.alreadyCommitted) "already_saved" else "synced",
+                                runId
+                            )
+                        is PipelineService.ProcessingResult.Skipped ->
+                            updateItemStatus(
+                                index,
+                                if (
+                                    result.reason ==
+                                    PipelineService.SkipReason.RETAINED_FOR_REVIEW
+                                ) "retained_review" else "filtered_out",
+                                runId
+                            )
+                        PipelineService.ProcessingResult.AwaitingConfiguration -> {
+                            recordManualOperationError(
+                                code = "PRIMARY_CURRENCY_REQUIRED",
+                                message = "Choose a primary currency in Settings before processing saved alerts.",
+                                actionLabel = "Open Settings"
+                            )
                             updateItemStatus(index, "error", runId)
                         }
-                        is SlmExtractionResult.Stopped ->
+                        is PipelineService.ProcessingResult.Failure -> {
+                            Log.e(TAG, "Grounded SMS processing failed: ${result.message}")
                             updateItemStatus(index, "error", runId)
+                        }
+                        PipelineService.ProcessingResult.Stopped ->
+                            throw CancellationException("Manual SMS processing stopped")
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -1217,24 +1181,17 @@ class HomeSyncManager @Inject constructor(
         status: String,
         runId: String?
     ) {
-        val shouldDiscardTransientOutput =
-            status in SOURCE_EVIDENCE_DISCARDED_STATUSES
         val updated = updateRunState(runId) { state ->
             val queue = state.queue.toMutableList()
             if (index !in queue.indices) return@updateRunState state
             queue[index] = queue[index].withPrivacySafeStatus(status)
             state.copy(
                 queue = queue,
-                thinkingOutput = if (shouldDiscardTransientOutput) {
-                    ""
-                } else {
-                    state.thinkingOutput
-                },
-                jsonOutput = if (shouldDiscardTransientOutput) {
-                    ""
-                } else {
-                    state.jsonOutput
-                }
+                decodedTokenDelta = "",
+                jsonOutput = "",
+                jsonOutputTruncated = false,
+                activeSmsPerformance = null,
+                activeModelName = null
             )
         }
         if (updated) {
@@ -1242,99 +1199,63 @@ class HomeSyncManager @Inject constructor(
         }
     }
 
-    private suspend fun persistSuccessfulExtraction(
+    private fun publishManualSmsTelemetry(
+        owner: ManualSmsTelemetryOwner,
         index: Int,
-        result: SlmExtractionResult.Success,
-        runId: String?
-    ) {
-        // Parsing and database work happen after the native request completes.
-        val parsed = extractionParser.parse(result.json)
-        val item = _syncState.value.queue[index]
-
-        if (parsed == null) {
-            ensureRunCanContinue(runId)
-            updateItemStatus(index, "filtered_out", runId)
-            return
-        }
-
-        val bank = inferBankFromSender(item.sender)
-        val merchant = parsed.counterparty
-            ?.takeIf {
-                it.isNotBlank() && !it.equals("null", ignoreCase = true)
-            }
-            ?: if (bank != "Unknown Account") {
-                "Transaction ($bank)"
+        telemetry: ManualSmsProcessingTelemetry
+    ): Boolean {
+        if (activeManualSmsTelemetryOwner.get() != owner) return false
+        var ownedSnapshot = false
+        val updated = updateRunState(owner.runId) { state ->
+            ownedSnapshot = state.ownsManualSmsTelemetry(owner, index) &&
+                activeManualSmsTelemetryOwner.get() == owner
+            if (!ownedSnapshot) {
+                state
             } else {
-                "Unknown Merchant"
-            }
-
-        // This is the commit boundary for one SMS. A stop immediately before
-        // it leaves the item pending. Once entered, account resolution and the
-        // transaction insert finish together with their in-memory settlement.
-        ensureRunCanContinue(runId)
-        val boundaryPublished = updateRunState(runId) { state ->
-            state.copy(currentStageIndex = 3)
-        }
-        if (!boundaryPublished) {
-            ensureRunCanContinue(runId)
-        }
-        withContext(NonCancellable) {
-            val account = parsed.account?.let {
-                accountRepository.getOrCreate(it, bank, "auto-extracted")
-            } ?: accountRepository.ensureDefault()
-
-            val insertion = transactionRepository.insertIfAbsent(
-                TransactionRepository.NewTransaction(
-                    amount = parsed.amount,
-                    merchant = merchant,
-                    date = item.date,
-                    type = parsed.type,
-                    accountId = account.id,
-                    rawMessage = item.body,
-                    sender = item.sender,
-                    slmPromptEvalMs = result.perf?.tPromptEvalMs,
-                    slmEvalMs = result.perf?.tEvalMs,
-                    slmNumTokens = result.perf?.nTokens,
-                    slmModelName = File(result.model.modelPath).name,
-                    sourceIdentity = item.sourceIdentity
+                state.copy(
+                    currentStageIndex = telemetry.stageIndex,
+                    decodedTokenDelta = telemetry.decodedTokenDelta,
+                    jsonOutput = telemetry.cumulativeStructuredOutput,
+                    jsonOutputTruncated = telemetry.outputTruncated,
+                    activeSmsPerformance = telemetry.performanceText,
+                    activeModelName = telemetry.modelName
                 )
-            )
-            val terminalStatus = if (insertion.inserted) {
-                "synced"
-            } else {
-                "already_saved"
             }
-        val perf = result.perf?.let {
-            "${"%.1f".format(it.tokensPerSecond)} tok/s • ${it.tEvalMs}ms"
-        } ?: "Done"
-        val stateUpdated = updateRunState(
-            runId = runId,
+        }
+        return updated && ownedSnapshot &&
+            activeManualSmsTelemetryOwner.get() == owner
+    }
+
+    private fun clearManualSmsTelemetry(
+        owner: ManualSmsTelemetryOwner,
+        index: Int
+    ) {
+        if (activeManualSmsTelemetryOwner.get() != owner) return
+        updateRunState(
+            runId = owner.runId,
             allowCancellationRequested = true
         ) { state ->
-            val latestQueue = state.queue.toMutableList()
-            if (index !in latestQueue.indices) {
-                return@updateRunState state
+            if (!state.ownsManualSmsTelemetry(owner, index)) {
+                state
+            } else {
+                state.copy(
+                    decodedTokenDelta = "",
+                    jsonOutput = "",
+                    jsonOutputTruncated = false,
+                    activeSmsPerformance = null,
+                    activeModelName = null
+                )
             }
-            latestQueue[index] = item.copy(
-                parsedAmount = parsed.amount.takeIf { insertion.inserted },
-                parsedMerchant = merchant.takeIf { insertion.inserted }
-            ).withPrivacySafeStatus(terminalStatus)
-            state.copy(
-                queue = latestQueue,
-                activeSmsPerformance = perf,
-                // Model output can echo source evidence. The parsed display
-                // summary above is all Home needs once processing is terminal.
-                thinkingOutput = "",
-                jsonOutput = ""
-            )
-        }
-        if (stateUpdated) {
-            // The ledger handoff is irreversible. A best-effort progress
-            // snapshot must never relabel a successfully saved row as failed.
-            recordManualProcessingProgressSafely(_syncState.value.queue)
-        }
         }
     }
+
+    private fun HomeSyncState.ownsManualSmsTelemetry(
+        owner: ManualSmsTelemetryOwner,
+        index: Int
+    ): Boolean = currentIndex == index &&
+        queue.getOrNull(index)?.let { item ->
+            item.id == owner.candidateKey && item.status == "syncing"
+        } == true
 
     private fun recordManualOperationError(
         code: String,
@@ -1443,28 +1364,8 @@ class HomeSyncManager @Inject constructor(
             }
             completedAt to recentScanCandidateKeys
         } ?: return
-        val expectedScanCompletedAt = tracking.first
-        val tracked = queue.filter { it.id in tracking.second }
-        val processed = tracked.count { it.status in TERMINAL_ITEM_STATUSES }
-        val saved = tracked.count {
-            it.status == "synced" || it.status == "already_saved"
-        }
-        val rejected = tracked.count { it.status == "filtered_out" }
-        val failed = tracked.count { it.status == "error" }
         setupImportStore.update { state ->
-            if (
-                state.lastSuccessfulRecentScanMillis !=
-                    expectedScanCompletedAt
-            ) {
-                state
-            } else {
-                state.copy(
-                    recentProcessedCount = processed,
-                    recentSavedCount = saved,
-                    recentRejectedCount = rejected,
-                    recentFailedCount = failed
-                )
-            }
+            state.withRecentProcessingProgress(queue, tracking.second, tracking.first)
         }
     }
 
@@ -1521,18 +1422,6 @@ class HomeSyncManager @Inject constructor(
         }
     }
 
-    private fun inferBankFromSender(sender: String): String {
-        val upper = sender.uppercase()
-        return when {
-            upper.contains("HDFC") -> "HDFC Bank"
-            upper.contains("AXIS") -> "Axis Bank"
-            upper.contains("ICICI") -> "ICICI Bank"
-            upper.contains("SBI") -> "State Bank of India"
-            upper.contains("KOTAK") -> "Kotak Bank"
-            else -> "Unknown Account"
-        }
-    }
-
     fun resetState() {
         synchronized(recentScanTrackingLock) {
             while (true) {
@@ -1571,12 +1460,6 @@ class HomeSyncManager @Inject constructor(
             HomeSyncState.Status.SYNCING,
             HomeSyncState.Status.CANCELLING
         )
-        val TERMINAL_ITEM_STATUSES = setOf(
-            "synced",
-            "already_saved",
-            "filtered_out",
-            "error"
-        )
     }
 }
 
@@ -1606,10 +1489,28 @@ internal fun settledManualSyncCancellation(
         },
         currentIndex = null,
         currentStageIndex = null,
-        thinkingOutput = "",
+        decodedTokenDelta = "",
         jsonOutput = "",
+        jsonOutputTruncated = false,
         activeSmsPerformance = null,
         syncError = null
+    )
+}
+
+private val TERMINAL_ITEM_STATUSES = setOf("synced", "already_saved", "filtered_out", "error")
+
+internal fun SetupImportState.withRecentProcessingProgress(
+    queue: List<SyncSmsItem>,
+    candidateKeys: Set<String>,
+    expectedScanCompletedAt: Long
+): SetupImportState {
+    if (lastSuccessfulRecentScanMillis != expectedScanCompletedAt) return this
+    val tracked = queue.filter { it.id in candidateKeys }
+    return copy(
+        recentProcessedCount = tracked.count { it.status in TERMINAL_ITEM_STATUSES },
+        recentSavedCount = tracked.count { it.status == "synced" || it.status == "already_saved" },
+        recentRejectedCount = tracked.count { it.status == "filtered_out" },
+        recentFailedCount = tracked.count { it.status == "error" }
     )
 }
 

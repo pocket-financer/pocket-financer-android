@@ -18,8 +18,7 @@ class SlmModelSpec(
     val contextSize: Int = 3072,
     val gpuLayers: Int = 0,
     val numThreads: Int = 0,
-    val hasFp16: Boolean = false,
-    val hasThinkingMode: Boolean = true
+    val hasFp16: Boolean = false
 ) {
     val modelPath: String = canonicalPath(modelPath)
 
@@ -39,8 +38,7 @@ class SlmModelSpec(
             contextSize == other.contextSize &&
             gpuLayers == other.gpuLayers &&
             numThreads == other.numThreads &&
-            hasFp16 == other.hasFp16 &&
-            hasThinkingMode == other.hasThinkingMode
+            hasFp16 == other.hasFp16
 
     override fun hashCode(): Int {
         var result = modelId.hashCode()
@@ -50,15 +48,13 @@ class SlmModelSpec(
         result = 31 * result + gpuLayers
         result = 31 * result + numThreads
         result = 31 * result + hasFp16.hashCode()
-        result = 31 * result + hasThinkingMode.hashCode()
         return result
     }
 
     override fun toString(): String =
         "SlmModelSpec(modelId=$modelId, modelPath=$modelPath, " +
             "artifactRevision=$artifactRevision, contextSize=$contextSize, " +
-            "gpuLayers=$gpuLayers, numThreads=$numThreads, hasFp16=$hasFp16, " +
-            "hasThinkingMode=$hasThinkingMode)"
+            "gpuLayers=$gpuLayers, numThreads=$numThreads, hasFp16=$hasFp16)"
 
     private companion object {
         fun canonicalPath(path: String): String = try {
@@ -97,22 +93,20 @@ fun interface SlmTokenCallback {
 }
 
 /**
- * Immutable snapshot of every native extraction input. In particular [grammar]
- * is captured by the caller once per SMS and is never re-read by the runtime.
+ * Immutable direct-generation request. In particular [grammar] is captured by
+ * the caller once and is never re-read by the runtime. There is intentionally
+ * no thinking/scratch channel in this production API.
  */
 data class SlmExtractionRequest(
     val messages: List<SlmChatMessage>,
     val fallbackPrompt: String,
     val staticPrefix: String? = null,
     val grammar: String? = null,
-    val thinkingTokens: Int = 1024,
     val answerTokens: Int = 256,
-    val thinkingCallback: SlmTokenCallback? = null,
     val jsonCallback: SlmTokenCallback? = null
 ) {
     init {
         require(messages.isNotEmpty()) { "At least one chat message is required" }
-        require(thinkingTokens >= 0) { "thinkingTokens must not be negative" }
         require(answerTokens > 0) { "answerTokens must be positive" }
     }
 }

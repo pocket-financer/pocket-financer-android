@@ -1,117 +1,157 @@
 package com.pocketfinancer.pipeline
 
-import com.pocketfinancer.data.model.Account
-import com.pocketfinancer.data.model.TransactionType
-import com.pocketfinancer.data.repository.AccountRepository
-import com.pocketfinancer.data.repository.TransactionRepository
+import com.pocketfinancer.data.db.entity.AdmittedSmsSourceEntity
+import com.pocketfinancer.data.db.entity.SmsProcessingOperationEntity
+import com.pocketfinancer.data.repository.ProcessingConfigurationRepository
+import com.pocketfinancer.data.repository.SmsAdmissionBusyException
+import com.pocketfinancer.data.repository.SmsOperationClaim
+import com.pocketfinancer.data.repository.SmsProcessingAdmission
+import com.pocketfinancer.data.repository.SmsProcessingStore
+import com.pocketfinancer.data.repository.SmsReviewRetryContext
+import com.pocketfinancer.inference.DirectCandidateSelectorResult
 import com.pocketfinancer.inference.SlmCacheDiagnostics
-import com.pocketfinancer.inference.SlmExtractionRequest
-import com.pocketfinancer.inference.SlmExtractionResult
 import com.pocketfinancer.inference.SlmLease
 import com.pocketfinancer.inference.SlmModelSpec
-import com.pocketfinancer.inference.SlmModelStorage
 import com.pocketfinancer.inference.SlmPerformanceData
+import com.pocketfinancer.pipeline.sms.DefaultSmsProcessingCoordinator
+import com.pocketfinancer.pipeline.sms.SmsContractAssets
+import com.pocketfinancer.pipeline.sms.SmsModelIdentity
+import com.pocketfinancer.pipeline.sms.SmsOperationConfiguration
+import com.pocketfinancer.pipeline.sms.SmsOperationSnapshot
+import com.pocketfinancer.pipeline.sms.SmsOperationSnapshotFactory
+import com.pocketfinancer.pipeline.sms.SmsProcessingObserver
+import com.pocketfinancer.pipeline.sms.SmsProcessingObserverEvent
+import com.pocketfinancer.pipeline.sms.SmsProcessingOutcome
+import com.pocketfinancer.pipeline.sms.SmsProcessingTransientEvent
 import com.pocketfinancer.sms.SmsReader
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
-import io.mockk.slot
 import io.mockk.verify
-import java.util.UUID
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.async
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.job
 import kotlinx.coroutines.test.runTest
 import org.junit.Before
 import org.junit.Test
 
 class PipelineServiceTest {
-
+    private lateinit var store: SmsProcessingStore
+    private lateinit var snapshotFactory: SmsOperationSnapshotFactory
+    private lateinit var configuration: ProcessingConfigurationRepository
+    private lateinit var coordinator: DefaultSmsProcessingCoordinator
+    private lateinit var grammarPreferences: SlmProcessingPreferences
     private lateinit var lease: SlmLease
-    private lateinit var model: SlmModelSpec
-    private lateinit var promptBuilder: PromptBuilder
-    private lateinit var extractionParser: ExtractionParser
-    private lateinit var transactionRepository: TransactionRepository
-    private lateinit var accountRepository: AccountRepository
-    private lateinit var preferences: SlmProcessingPreferences
-    private lateinit var modelStorage: SlmModelStorage
-    private lateinit var gbnfEnabled: MutableStateFlow<Boolean>
     private lateinit var pipeline: PipelineService
-
-    private val testSender = "AX-HDFCBK"
-    private val testBody = "Rs.500 credited to a/c XX0000"
+    private val snapshot = snapshot()
+    private val admittedSources = mutableListOf<AdmittedSmsSourceEntity>()
 
     @Before
     fun setUp() {
-        model = SlmModelSpec(
-            modelId = "test-model",
-            modelPath = "build/test-model.gguf",
-            hasThinkingMode = true
+        store = mockk(relaxed = true)
+        admittedSources.clear()
+        coEvery { store.admitForProcessing(any(), any()) } coAnswers {
+            val source = arg<AdmittedSmsSourceEntity>(0)
+            admittedSources += source
+            val create = arg<suspend (AdmittedSmsSourceEntity) -> String?>(1)
+            if (create(source) == null) SmsProcessingAdmission.AwaitingConfiguration else
+                SmsProcessingAdmission.Claimed(
+                    source, operation(source.id),
+                    SmsOperationClaim(snapshot.operationId, "owner", 1, Long.MAX_VALUE)
+                )
+        }
+        snapshotFactory = mockk()
+        configuration = mockk()
+        coordinator = mockk()
+        grammarPreferences = mockk()
+        every { grammarPreferences.gbnfGrammarEnabled } returns MutableStateFlow(false)
+        lease = mockk()
+        every { lease.model } returns SlmModelSpec(
+            modelId = "test-selector",
+            modelPath = "synthetic-model.gguf"
         )
-        lease = mockk(relaxed = true)
-        promptBuilder = mockk(relaxed = true)
-        extractionParser = mockk()
-        transactionRepository = mockk(relaxed = true)
-        accountRepository = mockk()
-        preferences = mockk()
-        modelStorage = mockk()
-        gbnfEnabled = MutableStateFlow(true)
-
-        every { lease.model } returns model
-        every {
-            promptBuilder.buildExtractionPrompt(any(), any())
-        } returns "Sender: AX-HDFCBK\nSMS: Rs.500 credited\nOutput:"
-        every {
-            promptBuilder.buildChatPrompt(any(), any())
-        } returns "<manual-chat-template>"
-        every { promptBuilder.getStaticPrefix() } returns "<static-prefix>"
-        every {
-            modelStorage.readTextAsset("sms_extraction.gbnf")
-        } returns "root ::= ..."
-        every { preferences.gbnfGrammarEnabled } returns gbnfEnabled
-        every { extractionParser.parse(any()) } returns null
-        coEvery { lease.extract(any()) } returns SlmExtractionResult.Null(model)
-
-        val defaultAccount = Account(
-            id = UUID.randomUUID().toString(),
-            name = "__UNKNOWN__",
-            bank = "Unknown Account",
-            type = "auto-extracted"
-        )
-        coEvery { accountRepository.ensureDefault() } returns defaultAccount
+        every { configuration.enabledProfiles("INR") } returns listOf("core-en", "india")
+        every { coordinator.modelIdentityForLease(lease) } returns
+            SmsModelIdentity(true, "test-selector", "a".repeat(64))
+        every { coordinator.currentModelIdentity() } returns
+            SmsModelIdentity(false, null, null)
         coEvery {
-            accountRepository.getOrCreate(any(), any(), any())
-        } returns Account(
-            id = UUID.randomUUID().toString(),
-            name = "A/c XX0000",
-            bank = "HDFC Bank",
-            type = "auto-extracted"
-        )
-        val insertResult = mockk<TransactionRepository.InsertResult>()
-        every { insertResult.inserted } returns true
-        coEvery {
-            transactionRepository.insertIfAbsent(any())
-        } returns insertResult
-
+            snapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any()
+            )
+        } returns snapshot
         pipeline = PipelineService(
-            promptBuilder = promptBuilder,
-            extractionParser = extractionParser,
-            transactionRepository = transactionRepository,
-            accountRepository = accountRepository,
-            smsFilterPipeline = SmsFilterPipeline(),
-            slmProcessingPreferences = preferences,
-            modelStorage = modelStorage
+            store, snapshotFactory, configuration, coordinator, grammarPreferences
         )
+    }
+
+    @Test
+    fun `discovery checks reliable saved evidence without settings snapshots or runtime calls`() = runTest {
+        val checked = mutableListOf<AdmittedSmsSourceEntity>()
+        coEvery { store.verifiedSavedSourceTransactionIds(any()) } coAnswers {
+            checked += arg<AdmittedSmsSourceEntity>(0)
+            listOf("saved-transaction")
+        }
+        val sms = message().copy(sourceTimestamp = message().date - 5_000L)
+
+        assertTrue(pipeline.hasVerifiedSavedSource(sms))
+
+        val source = checked.single()
+        assertEquals(sms.sourceIdentity.opaqueCandidateKey, source.id)
+        assertEquals(sms.sourceIdentity.messageId, source.sourceMessageId)
+        assertEquals(sms.sourceIdentity.fallbackFingerprint, source.sourceFingerprint)
+        assertEquals(sms.sourceIdentity.alternateFingerprint, source.sourceAlternateFingerprint)
+        assertEquals(sms.address, source.sender)
+        assertEquals(sms.body, source.rawMessage)
+        assertEquals(sms.sourceTimestamp, source.sourceTimestamp)
+        assertEquals(sms.type, source.messageType)
+        coVerify(exactly = 0) { store.admitForProcessing(any(), any()) }
+        verify(exactly = 0) { configuration.confirmedPrimaryCurrency() }
+        verify(exactly = 0) { grammarPreferences.gbnfGrammarEnabled }
+        assertNoNewExtraction()
+    }
+
+    @Test
+    fun `provider less discovery bypasses outcome lookup and unknown provider reaches admission`() = runTest {
+        coEvery { store.verifiedSavedSourceTransactionIds(any()) } returns emptyList()
+
+        assertFalse(pipeline.hasVerifiedSavedSource(message().copy(providerMessageId = null)))
+        coVerify(exactly = 0) { store.verifiedSavedSourceTransactionIds(any()) }
+
+        every { configuration.confirmedPrimaryCurrency() } returns null
+        assertFalse(pipeline.hasVerifiedSavedSource(message()))
+        assertEquals(PipelineService.ProcessingResult.AwaitingConfiguration, pipeline.processSingle(message()))
+        coVerify(exactly = 1) { store.verifiedSavedSourceTransactionIds(any()) }
+        coVerify(exactly = 1) { store.admitForProcessing(any(), any()) }
+        verify(exactly = 1) { configuration.confirmedPrimaryCurrency() }
+        assertNoNewExtraction()
+    }
+
+    @Test
+    fun `discovery and normal admission share provider source evidence with distinct timestamps`() = runTest {
+        val sms = message().copy(sourceTimestamp = message().date - 5_000L)
+        var discovered: AdmittedSmsSourceEntity? = null
+        coEvery { store.verifiedSavedSourceTransactionIds(any()) } coAnswers {
+            discovered = arg(0)
+            emptyList()
+        }
+        every { configuration.confirmedPrimaryCurrency() } returns null
+
+        assertFalse(pipeline.hasVerifiedSavedSource(sms))
+        assertEquals(PipelineService.ProcessingResult.AwaitingConfiguration, pipeline.processSingle(sms))
+
+        val admitted = admittedSources.single()
+        assertEquals(
+            admitted.copy(origin = "discovery", admittedAt = checkNotNull(discovered).admittedAt),
+            discovered
+        )
+        assertNoNewExtraction()
     }
 
     @Test
@@ -120,488 +160,555 @@ class PipelineServiceTest {
     }
 
     @Test
-    fun `enabled grammar is snapshotted and passed in immutable request`() = runTest {
-        val request = slot<SlmExtractionRequest>()
+    fun `source is admitted before missing configuration pauses processing`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns null
 
-        pipeline.processSingle(transactionSms(), lease)
+        val result = pipeline.processSingle(message(), lease)
 
-        coVerify(exactly = 1) { lease.extract(capture(request)) }
-        assertEquals("root ::= ...", request.captured.grammar)
-        verify(exactly = 1) {
-            modelStorage.readTextAsset("sms_extraction.gbnf")
+        assertEquals(PipelineService.ProcessingResult.AwaitingConfiguration, result)
+        coVerify(exactly = 1) { store.admitForProcessing(any(), any()) }
+        coVerify(exactly = 0) {
+            snapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any()
+            )
+        }
+        coVerify(exactly = 0) { coordinator.processAdmitted(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `configured processing delegates once and retains review outcome`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
+            SmsProcessingOutcome.RetainedForReview(
+                snapshot.operationId,
+                "review-id",
+                listOf("persistence_blocked_by_rollout_mode")
+            )
+
+        val result = pipeline.processSingle(message(), lease, trigger = "manual")
+
+        val skipped = assertIs<PipelineService.ProcessingResult.Skipped>(result)
+        assertEquals(PipelineService.SkipReason.RETAINED_FOR_REVIEW, skipped.reason)
+        coVerify(exactly = 1) { store.admitForProcessing(any(), any()) }
+        coVerify(exactly = 1) {
+            coordinator.processAdmitted(any(), snapshot, any(), lease, any())
         }
     }
 
     @Test
-    fun `disabled grammar skips asset and sends null grammar`() = runTest {
-        gbnfEnabled.value = false
-        val request = slot<SlmExtractionRequest>()
+    fun `distinct new admissions snapshot the selected grammar setting`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        val enabled = MutableStateFlow(false)
+        every { grammarPreferences.gbnfGrammarEnabled } returns enabled
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
+            SmsProcessingOutcome.RetainedForReview(snapshot.operationId, "review-id", emptyList())
 
-        pipeline.processSingle(transactionSms(), lease)
+        pipeline.processSingle(message(), lease, trigger = "manual")
+        coVerify(exactly = 1) {
+            snapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), false
+            )
+        }
 
-        coVerify(exactly = 1) { lease.extract(capture(request)) }
-        assertNull(request.captured.grammar)
-        verify(exactly = 0) {
-            modelStorage.readTextAsset("sms_extraction.gbnf")
+        enabled.value = true
+        pipeline.processSingle(
+            message().copy(providerMessageId = "another-provider-id"),
+            lease,
+            trigger = "manual"
+        )
+        coVerify(exactly = 1) {
+            snapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), true
+            )
         }
     }
 
     @Test
-    fun `in-flight SMS keeps grammar snapshot and next SMS uses new setting`() = runTest {
-        val inferenceStarted = CompletableDeferred<Unit>()
-        val releaseFirstInference = CompletableDeferred<Unit>()
-        val capturedGrammar = mutableListOf<String?>()
+    fun `worker entrypoint lets coordinator retain an unavailable model`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), null, any()) } returns
+            SmsProcessingOutcome.RetainedForReview(
+                snapshot.operationId,
+                "review-id",
+                listOf("runtime_unavailable")
+            )
 
-        coEvery { lease.extract(any()) } coAnswers {
-            val request = firstArg<SlmExtractionRequest>()
-            capturedGrammar += request.grammar
-            if (capturedGrammar.size == 1) {
-                inferenceStarted.complete(Unit)
-                releaseFirstInference.await()
-            }
-            SlmExtractionResult.Null(model)
-        }
+        val result = pipeline.processSingle(message(), trigger = "realtime")
 
-        val firstSms = async {
-            pipeline.processSingle(transactionSms(date = 1_000L), lease)
-        }
-        inferenceStarted.await()
-        gbnfEnabled.value = false
-        releaseFirstInference.complete(Unit)
-        firstSms.await()
-
-        pipeline.processSingle(transactionSms(date = 2_000L), lease)
-
-        assertEquals(listOf("root ::= ...", null), capturedGrammar)
-        verify(exactly = 1) {
-            modelStorage.readTextAsset("sms_extraction.gbnf")
+        val skipped = assertIs<PipelineService.ProcessingResult.Skipped>(result)
+        assertEquals(PipelineService.SkipReason.RETAINED_FOR_REVIEW, skipped.reason)
+        coVerify(exactly = 1) { coordinator.processAdmitted(any(), snapshot, any(), null, any()) }
+        coVerify(exactly = 0) {
+            coordinator.processAdmitted(any(), any(), any(), lease, any())
         }
     }
 
     @Test
-    fun `raw messages and fallback prompt are handed to runtime for atomic templating`() =
-        runTest {
-            val request = slot<SlmExtractionRequest>()
+    fun `queued realtime candidate operates on durable admittedSourceId`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), null, any()) } returns
+            SmsProcessingOutcome.TerminallyDiscarded(snapshot.operationId, "prefilter_otp_verification")
+        val providerlessSms = message().copy(providerMessageId = null)
 
-            pipeline.processSingle(transactionSms(), lease)
+        val result = pipeline.processSingle(
+            sms = providerlessSms,
+            trigger = "realtime",
+            admittedSourceId = "durable-candidate-key-1"
+        )
 
-            coVerify { lease.extract(capture(request)) }
-            assertEquals(listOf("system", "user"), request.captured.messages.map { it.role })
-            assertEquals("<manual-chat-template>", request.captured.fallbackPrompt)
-            assertEquals("<static-prefix>", request.captured.staticPrefix)
-            verify {
-                promptBuilder.buildChatPrompt(
-                    rawPrompt = any(),
-                    enableThinking = true
+        val skipped = assertIs<PipelineService.ProcessingResult.Skipped>(result)
+        assertEquals(PipelineService.SkipReason.NOT_TRANSACTION, skipped.reason)
+        val admitted = admittedSources.single()
+        assertEquals("durable-candidate-key-1", admitted.id)
+        assertEquals(providerlessSms.sourceIdentity.messageId, admitted.sourceMessageId)
+    }
+
+    @Test
+    fun `retryable coordinator outcome remains retryable`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
+            SmsProcessingOutcome.RetryableFailure(
+                snapshot.operationId,
+                "review-id",
+                "runtime_unavailable",
+                "model_available"
+            )
+
+        val failure = assertIs<PipelineService.ProcessingResult.Failure>(
+            pipeline.processSingle(message(), lease)
+        )
+
+        assertEquals(true, failure.retryable)
+        assertEquals("Saved for retry: runtime_unavailable", failure.message)
+    }
+
+    @Test
+    fun `complete automatic outcome reports saved transaction exactly once`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), lease, any()) } returns
+            SmsProcessingOutcome.Persisted(
+                snapshot.operationId,
+                listOf("transaction-id"),
+                alreadyCommitted = false
+            )
+
+        val saved = assertIs<PipelineService.ProcessingResult.Saved>(
+            pipeline.processSingle(message(), lease)
+        )
+
+        assertEquals(listOf("transaction-id"), saved.transactionIds)
+        assertEquals(false, saved.alreadyCommitted)
+        coVerify(exactly = 1) {
+            coordinator.processAdmitted(any(), snapshot, any(), lease, any())
+        }
+    }
+
+    @Test
+    fun `decoded callbacks reach processing observer in order with completed output`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        val model = SlmModelSpec("test-selector", "synthetic-model.gguf")
+        coEvery {
+            coordinator.processAdmitted(any(), snapshot, any(), lease, any())
+        } coAnswers {
+            val observer = arg<SmsProcessingObserver>(4)
+            observer.onEvent(
+                observerEvent(
+                    SmsProcessingTransientEvent.InferenceStarted(model, true, 512)
                 )
-            }
-        }
-
-    @Test
-    fun `observer receives ordered filter inference token completion and persistence events`() =
-        runTest {
-            val perf = SlmPerformanceData(
-                tLoadMs = 11,
-                tPromptEvalMs = 22,
-                tEvalMs = 33,
-                nTokens = 44
             )
-            val cache = SlmCacheDiagnostics(
-                attempted = true,
-                hit = true,
-                sessionFile = "session-test.bin",
-                prefixTokens = 55
-            )
-            val extractionResult = SlmExtractionResult.Success(
-                json = """{"amount":500.0,"type":"credit"}""",
-                perf = perf,
-                model = model,
-                cache = cache
-            )
-            val events = mutableListOf<PipelineService.ProcessingEvent>()
-            every { extractionParser.parse(any()) } returns extractedTransaction()
-            coEvery { lease.extract(any()) } coAnswers {
-                val request = firstArg<SlmExtractionRequest>()
-                request.thinkingCallback?.onToken("checking ")
-                request.thinkingCallback?.onToken("amount")
-                request.jsonCallback?.onToken("{\"amount\":")
-                request.jsonCallback?.onToken("500.0}")
-                extractionResult
-            }
-
-            val result = pipeline.processSingle(
-                sms = transactionSms(),
-                lease = lease,
-                observer = PipelineService.ProcessingObserver { event ->
-                    events += event
-                }
-            )
-
-            assertIs<PipelineService.ProcessingResult.Saved>(result)
-            assertEquals(
-                listOf(
-                    PipelineService.ProcessingEvent.DeterministicFilterStarted,
-                    PipelineService.ProcessingEvent.DeterministicFilterPassed,
-                    PipelineService.ProcessingEvent.InferenceStarted(
-                        model = model,
-                        thinkingEnabled = true,
-                        grammarEnabled = true,
-                        thinkingTokenBudget = 1024,
-                        answerTokenBudget = 256
-                    ),
-                    PipelineService.ProcessingEvent.ThinkingTokenDelta("checking "),
-                    PipelineService.ProcessingEvent.ThinkingTokenDelta("amount"),
-                    PipelineService.ProcessingEvent.JsonTokenDelta("{\"amount\":"),
-                    PipelineService.ProcessingEvent.JsonTokenDelta("500.0}"),
-                    PipelineService.ProcessingEvent.InferenceCompleted(extractionResult),
-                    PipelineService.ProcessingEvent.PersistenceStarted
-                ),
-                events
-            )
-            val completed = assertIs<
-                PipelineService.ProcessingEvent.InferenceCompleted
-            >(events[7])
-            assertEquals(extractionResult.json, completed.json)
-            assertEquals(perf, completed.perf)
-            assertEquals(cache, completed.cache)
-            assertEquals(model, completed.model)
-        }
-
-    @Test
-    fun `successful extraction persists outside runtime call with exact model artifact`() =
-        runTest {
-            every { extractionParser.parse(any()) } returns extractedTransaction()
-            coEvery { lease.extract(any()) } returns SlmExtractionResult.Success(
-                json = """{"amount":500.0,"type":"credit"}""",
-                model = model
-            )
-
-            val result = pipeline.processSingle(transactionSms(), lease)
-
-            assertIs<PipelineService.ProcessingResult.Saved>(result)
-            coVerify(exactly = 1) {
-                transactionRepository.insertIfAbsent(match {
-                    it.amount == 500.0 &&
-                        it.merchant == "UPI Ref 12345" &&
-                        it.slmModelName == "test-model.gguf"
-                })
-            }
-            assertEquals(PipelineService.Stage.SAVED, pipeline.pipelineState.value?.stage)
-        }
-
-    @Test
-    fun `null inference is typed as skipped rather than operational failure`() = runTest {
-        val result = pipeline.processSingle(transactionSms(), lease)
-
-        assertEquals(
-            PipelineService.ProcessingResult.Skipped(
-                PipelineService.SkipReason.NOT_TRANSACTION
-            ),
-            result
-        )
-        assertEquals(PipelineService.Stage.SKIPPED, pipeline.pipelineState.value?.stage)
-    }
-
-    @Test
-    fun `parser rejection is distinguished from model null`() = runTest {
-        coEvery { lease.extract(any()) } returns SlmExtractionResult.Success(
-            json = """{"amount":null}""",
-            model = model
-        )
-
-        val result = pipeline.processSingle(transactionSms(), lease)
-
-        assertEquals(
-            PipelineService.ProcessingResult.Skipped(
-                PipelineService.SkipReason.EXTRACTION_REJECTED
-            ),
-            result
-        )
-    }
-
-    @Test
-    fun `stopped inference has typed stopped result`() = runTest {
-        coEvery { lease.extract(any()) } returns SlmExtractionResult.Stopped(model)
-
-        val result = pipeline.processSingle(transactionSms(), lease)
-
-        assertEquals(PipelineService.ProcessingResult.Stopped, result)
-        assertEquals("Inference stopped", pipeline.pipelineState.value?.message)
-    }
-
-    @Test
-    fun `runtime error is retryable typed failure`() = runTest {
-        coEvery { lease.extract(any()) } returns SlmExtractionResult.Error(
-            message = "OOM: out of memory",
-            model = model
-        )
-
-        val result = pipeline.processSingle(transactionSms(), lease)
-
-        assertEquals(
-            PipelineService.ProcessingResult.Failure(
-                message = "OOM: out of memory",
-                retryable = true
-            ),
-            result
-        )
-    }
-
-    @Test
-    fun `cancellation is never converted into pipeline failure`() = runTest {
-        coEvery { lease.extract(any()) } throws CancellationException("cancelled")
-
-        assertFailsWith<CancellationException> {
-            pipeline.processSingle(transactionSms(), lease)
-        }
-        assertEquals(
-            "Processing transactional SMS",
-            pipeline.pipelineState.value?.message
-        )
-        assertTrue(pipeline.pipelineState.value?.message?.contains(testSender) == false)
-        assertTrue(pipeline.pipelineState.value?.message?.contains(testBody) == false)
-        coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
-    }
-
-    @Test
-    fun `cancellation that wins before commit does not persist current SMS`() =
-        runTest {
-            every { extractionParser.parse(any()) } returns extractedTransaction()
-            coEvery { lease.extract(any()) } coAnswers {
-                currentCoroutineContext().job.cancel(
-                    CancellationException("user stopped batch")
+            observer.onEvent(
+                observerEvent(
+                    SmsProcessingTransientEvent.DecodedToken("{", "{")
                 )
-                SlmExtractionResult.Success(
-                    json = """{"amount":500.0,"type":"credit"}""",
-                    model = model
-                )
-            }
-
-            val processing = async {
-                pipeline.processSingle(transactionSms(), lease)
-            }
-
-            assertFailsWith<CancellationException> { processing.await() }
-            coVerify(exactly = 0) {
-                accountRepository.getOrCreate(any(), any(), any())
-            }
-            coVerify(exactly = 0) { accountRepository.ensureDefault() }
-            coVerify(exactly = 0) {
-                transactionRepository.insertIfAbsent(any())
-            }
-        }
-
-    @Test
-    fun `cancellation during commit lets current SMS persistence finish`() =
-        runTest {
-            every { extractionParser.parse(any()) } returns extractedTransaction()
-            coEvery { lease.extract(any()) } returns SlmExtractionResult.Success(
-                json = """{"amount":500.0,"type":"credit"}""",
-                model = model
             )
-            val insertStarted = CompletableDeferred<Unit>()
-            val allowInsertToFinish = CompletableDeferred<Unit>()
-            val insertFinished = CompletableDeferred<Unit>()
-            val insertResult = mockk<TransactionRepository.InsertResult>()
-            every { insertResult.inserted } returns true
-            coEvery {
-                transactionRepository.insertIfAbsent(any())
-            } coAnswers {
-                insertStarted.complete(Unit)
-                allowInsertToFinish.await()
-                insertFinished.complete(Unit)
-                insertResult
-            }
-
-            val processing = async {
-                pipeline.processSingle(transactionSms(), lease)
-            }
-            insertStarted.await()
-
-            processing.cancel(CancellationException("user stopped batch"))
-            allowInsertToFinish.complete(Unit)
-            processing.join()
-
-            assertTrue(insertFinished.isCompleted)
-            coVerify(exactly = 1) {
-                transactionRepository.insertIfAbsent(any())
-            }
-        }
-
-    @Test
-    fun `callback cancellation after commit preserves committed result`() =
-        runTest {
-            every { extractionParser.parse(any()) } returns extractedTransaction()
-            coEvery { lease.extract(any()) } returns SlmExtractionResult.Success(
-                json = """{"amount":500.0,"type":"credit"}""",
-                model = model
-            )
-
-            val failure = assertFailsWith<
-                PipelineService.PostPersistenceCommitException
-            > {
-                pipeline.processSingle(
-                    sms = transactionSms(),
-                    lease = lease,
-                    onPersistenceCommitted = {
-                        throw CancellationException("callback failed")
-                    }
+            observer.onEvent(
+                observerEvent(
+                    SmsProcessingTransientEvent.DecodedToken(
+                        "\"decision\":\"none\"}",
+                        "{\"decision\":\"none\"}"
+                    )
                 )
-            }
-
-            assertTrue(failure.committedResult.newlyInserted)
-            assertEquals(extractedTransaction(), failure.committedResult.transaction)
-            assertIs<CancellationException>(failure.cause)
-            coVerify(exactly = 1) {
-                transactionRepository.insertIfAbsent(any())
-            }
+            )
+            observer.onEvent(
+                observerEvent(
+                    SmsProcessingTransientEvent.InferenceCompleted(
+                        DirectCandidateSelectorResult(
+                            rawOutput = "{\"decision\":\"none\"}",
+                            completion = "complete",
+                            safeErrorCode = null,
+                            model = model,
+                            performance = SlmPerformanceData(1, 2, 100, 3),
+                            cache = SlmCacheDiagnostics()
+                        )
+                    )
+                )
+            )
+            SmsProcessingOutcome.TerminallyDiscarded(
+                snapshot.operationId,
+                "extractor_none"
+            )
         }
-
-    @Test
-    fun `non-transactional SMS reports filter rejection and never reaches runtime`() =
-        runTest {
-        val sms = SmsReader.SmsMessage(
-            address = "+919999999999",
-            body = "Hello there, Rs. 500",
-            date = 1_000L,
-            type = 1
-        )
         val events = mutableListOf<PipelineService.ProcessingEvent>()
 
         val result = pipeline.processSingle(
-            sms = sms,
-            lease = lease,
-            observer = PipelineService.ProcessingObserver { event ->
-                events += event
-            }
+            message(),
+            lease,
+            observer = PipelineService.ProcessingObserver(events::add)
         )
 
         assertIs<PipelineService.ProcessingResult.Skipped>(result)
-        assertEquals(
-            listOf(
-                PipelineService.ProcessingEvent.DeterministicFilterStarted,
-                PipelineService.ProcessingEvent.DeterministicFilterRejected
+        assertIs<PipelineService.ProcessingEvent.InferenceStarted>(events[0])
+        val first = assertIs<PipelineService.ProcessingEvent.JsonTokenDelta>(events[1])
+        val second = assertIs<PipelineService.ProcessingEvent.JsonTokenDelta>(events[2])
+        val completed = assertIs<PipelineService.ProcessingEvent.InferenceCompleted>(events[3])
+        assertEquals("{", first.cumulativeStructuredOutput)
+        assertEquals("{\"decision\":\"none\"}", second.cumulativeStructuredOutput)
+        assertEquals("{\"decision\":\"none\"}", completed.json)
+        assertTrue(events.size == 4)
+    }
+
+    @Test
+    fun `settled replay ignores changed settings across manual historical and realtime entrypoints`() = runTest {
+        coEvery { store.admitForProcessing(any(), any()) } returns SmsProcessingAdmission.Existing(
+            operation().copy(
+                state = "persisted",
+                settledAt = 2,
+                settlementReceiptJson = "{\"transaction_ids\":[\"saved-id\"]}"
             ),
-            events
+            null
         )
-        coVerify(exactly = 0) { lease.extract(any()) }
-    }
-
-    @Test
-    fun `observer non-fatal throwables cannot change inference or persistence outcome`() = runTest {
-        every { extractionParser.parse(any()) } returns extractedTransaction()
-        val extractionResult = SlmExtractionResult.Success(
-            json = """{"amount":500.0,"type":"credit"}""",
-            model = model
-        )
-        coEvery { lease.extract(any()) } coAnswers {
-            val request = firstArg<SlmExtractionRequest>()
-            request.thinkingCallback?.onToken("private reasoning")
-            request.jsonCallback?.onToken(extractionResult.json)
-            extractionResult
-        }
-        var attemptedNotifications = 0
-        val failingObserver = PipelineService.ProcessingObserver {
-            attemptedNotifications += 1
-            throw AssertionError("rendering failed")
-        }
-
-        val result = pipeline.processSingle(
-            sms = transactionSms(),
-            lease = lease,
-            observer = failingObserver
-        )
-
-        assertIs<PipelineService.ProcessingResult.Saved>(result)
-        assertEquals(7, attemptedNotifications)
-        coVerify(exactly = 1) { transactionRepository.insertIfAbsent(any()) }
-    }
-
-    @Test
-    fun `observer fatal VM errors are never swallowed`() = runTest {
-        assertFailsWith<OutOfMemoryError> {
-            pipeline.processSingle(
-                sms = transactionSms(),
-                lease = lease,
-                observer = PipelineService.ProcessingObserver {
-                    throw OutOfMemoryError("fatal observer failure")
-                }
-            )
-        }
-
-        coVerify(exactly = 0) { lease.extract(any()) }
-        coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
-    }
-
-    @Test
-    fun `fatal token observer error escapes runtime error conversion`() = runTest {
-        coEvery { lease.extract(any()) } coAnswers {
-            val request = firstArg<SlmExtractionRequest>()
-            try {
-                request.thinkingCallback?.onToken("private reasoning")
-            } catch (_: OutOfMemoryError) {
-                // Mirrors a runtime boundary that converts callback throwables
-                // into a regular inference error result.
+        val enabled = MutableStateFlow(false)
+        every { grammarPreferences.gbnfGrammarEnabled } returns enabled
+        for (trigger in listOf("manual", "historical", "realtime")) {
+            enabled.value = !enabled.value
+            val result = if (trigger == "realtime") {
+                pipeline.processSingle(message(), trigger = trigger)
+            } else {
+                pipeline.processSingle(message(), lease, trigger = trigger)
             }
-            SlmExtractionResult.Error(
-                message = "runtime converted callback failure",
-                model = model
-            )
+            assertEquals(PipelineService.ProcessingResult.Saved(listOf("saved-id"), true), result)
         }
-
-        assertFailsWith<OutOfMemoryError> {
-            pipeline.processSingle(
-                sms = transactionSms(),
-                lease = lease,
-                observer = PipelineService.ProcessingObserver { event ->
-                    if (event is PipelineService.ProcessingEvent.ThinkingTokenDelta) {
-                        throw OutOfMemoryError("fatal token observer failure")
-                    }
-                }
-            )
-        }
-
-        coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
+        assertNoNewExtraction()
+        verify(exactly = 0) { configuration.confirmedPrimaryCurrency() }
+        verify(exactly = 0) { grammarPreferences.gbnfGrammarEnabled }
     }
 
     @Test
-    fun `fatal token observer error wins over runtime cancellation`() = runTest {
-        coEvery { lease.extract(any()) } coAnswers {
-            val request = firstArg<SlmExtractionRequest>()
-            try {
-                request.jsonCallback?.onToken("{\"amount\":")
-            } catch (_: OutOfMemoryError) {
-                // Mirrors a coordinator stop racing the backend failure.
-            }
-            throw CancellationException("runtime stopped")
-        }
-
-        assertFailsWith<OutOfMemoryError> {
-            pipeline.processSingle(
-                sms = transactionSms(),
-                lease = lease,
-                observer = PipelineService.ProcessingObserver { event ->
-                    if (event is PipelineService.ProcessingEvent.JsonTokenDelta) {
-                        throw OutOfMemoryError("fatal token observer failure")
-                    }
-                }
-            )
-        }
-
-        coVerify(exactly = 0) { transactionRepository.insertIfAbsent(any()) }
+    fun `busy and conflicting source identities never create snapshot or call coordinator`() = runTest {
+        coEvery { store.admitForProcessing(any(), any()) } returns
+            SmsProcessingAdmission.Busy(snapshot.operationId)
+        assertTrue(
+            assertIs<PipelineService.ProcessingResult.Failure>(
+                pipeline.processSingle(message(), lease)
+            ).retryable
+        )
+        coEvery { store.admitForProcessing(any(), any()) } returns SmsProcessingAdmission.Conflict
+        assertEquals(
+            false,
+            assertIs<PipelineService.ProcessingResult.Failure>(
+                pipeline.processSingle(message(), trigger = "realtime")
+            ).retryable
+        )
+        assertNoNewExtraction()
     }
 
-    private fun transactionSms(date: Long = 1_000L) = SmsReader.SmsMessage(
-        address = testSender,
-        body = testBody,
-        date = date,
-        type = 1
+    @Test
+    fun `recovered ready and interrupted operations reuse their visible review without resnapshot`() = runTest {
+        coEvery { store.admitForProcessing(any(), any()) } returns SmsProcessingAdmission.Existing(
+            operation().copy(state = "interrupted"),
+            "existing-review"
+        )
+        assertEquals(
+            PipelineService.ProcessingResult.Skipped(PipelineService.SkipReason.RETAINED_FOR_REVIEW),
+            pipeline.processSingle(message(), lease)
+        )
+        assertNoNewExtraction()
+    }
+
+    @Test
+    fun `none and owner rejected replay create no extraction or duplicate review`() = runTest {
+        coEvery { store.admitForProcessing(any(), any()) } returnsMany listOf(
+            SmsProcessingAdmission.Existing(
+                operation().copy(state = "discarded", settledAt = 2),
+                null
+            ),
+            SmsProcessingAdmission.Existing(
+                operation().copy(state = "retain_review", settledAt = 2),
+                "rejected-review",
+                "rejected"
+            )
+        )
+        repeat(2) {
+            assertEquals(
+                PipelineService.ProcessingResult.Skipped(PipelineService.SkipReason.NOT_TRANSACTION),
+                pipeline.processSingle(message())
+            )
+        }
+        assertNoNewExtraction()
+    }
+
+    @Test
+    fun `owner confirmed transaction is reused without another model call`() = runTest {
+        coEvery { store.admitForProcessing(any(), any()) } returns
+            SmsProcessingAdmission.Saved(listOf("owner-confirmed-id"))
+        assertEquals(
+            PipelineService.ProcessingResult.Saved(listOf("owner-confirmed-id"), true),
+            pipeline.processSingle(message())
+        )
+        assertNoNewExtraction()
+    }
+
+    @Test
+    fun `identical providerless manual content does not become reliable identity`() = runTest {
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        coEvery { coordinator.processAdmitted(any(), snapshot, any(), null, any()) } returns
+            SmsProcessingOutcome.RetainedForReview(snapshot.operationId, "review-id", emptyList())
+        val sms = message().copy(providerMessageId = null)
+        repeat(2) { pipeline.processSingle(sms, trigger = "manual") }
+        assertEquals(2, admittedSources.map { it.id }.distinct().size)
+        assertEquals(2, admittedSources.map { it.sourceMessageId }.distinct().size)
+        assertEquals(1, admittedSources.map { it.sourceFingerprint }.distinct().size)
+        assertTrue(admittedSources.all { it.sourceProviderMessageId == null })
+    }
+
+    @Test
+    fun `explicit retry cannot steal active source processing`() = runTest {
+        coEvery { store.retryContext("review-id") } throws SmsAdmissionBusyException()
+        assertTrue(
+            assertIs<PipelineService.ProcessingResult.Failure>(
+                pipeline.retryReview("review-id", "current")
+            ).retryable
+        )
+        assertNoNewExtraction()
+    }
+
+    @Test
+    fun `explicit current settings retry passes preserved parent and event lineage`() = runTest {
+        val source = source()
+        val parent = operation(source.id).copy(
+            state = "retain_review",
+            settledAt = 2,
+            configurationJson = """{"contract":"${SmsContractAssets.PROCESSING_CONFIG_CONTRACT}","currency_context":{"primary_currency":"INR","enabled_profile_ids":["core-en","india"]}}"""
+        )
+        coEvery { store.retryContext("review-id") } returns SmsReviewRetryContext(
+            "review-id",
+            source,
+            parent
+        )
+        every { configuration.confirmedPrimaryCurrency() } returns "INR"
+        every { grammarPreferences.gbnfGrammarEnabled } returns MutableStateFlow(true)
+        coEvery { coordinator.process(any(), snapshot, any()) } returns
+            SmsProcessingOutcome.RetainedForReview(snapshot.operationId, "review-id", emptyList())
+
+        pipeline.retryReview("review-id", "current")
+
+        coVerify(exactly = 1) {
+            snapshotFactory.create(
+                any(), "retry", "INR", listOf("core-en", "india"), any(), any(), source.admittedAt,
+                any(), "llama.cpp-jni", any(), parent.stableEventId, parent.id, any(), true
+            )
+        }
+    }
+
+    @Test
+    fun `original consolidated retry decodes stored snapshot and executes with frozen fields`() = runTest {
+        val source = source()
+        val parent = operation(source.id).copy(
+            state = "retain_review",
+            settledAt = 2,
+            configurationJson = """{"contract":"${SmsContractAssets.PROCESSING_CONFIG_CONTRACT}"}"""
+        )
+        val frozenSnapshot = snapshot().let {
+            it.copy(
+                configuration = it.configuration.copy(
+                    extractorEligible = false,
+                    extractorIneligibilityReason = "runtime_unavailable",
+                    modelIdentifier = null,
+                    modelFileSha256 = null,
+                    grammarEnabled = true
+                )
+            )
+        }
+        val retrySnapshot = mockk<SmsOperationSnapshot>()
+        coEvery { store.retryContext("review-id") } returns SmsReviewRetryContext(
+            "review-id",
+            source,
+            parent
+        )
+        every { snapshotFactory.decode(parent) } returns frozenSnapshot
+        coEvery {
+            snapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any()
+            )
+        } returns retrySnapshot
+        coEvery { coordinator.process(any(), retrySnapshot, any()) } returns
+            SmsProcessingOutcome.RetainedForReview("retry-operation", "review-id", emptyList())
+
+        val result = pipeline.retryReview("review-id", "original")
+
+        assertIs<PipelineService.ProcessingResult.Skipped>(result)
+        coVerify(exactly = 1) {
+            snapshotFactory.create(
+                any(),
+                "retry",
+                "INR",
+                listOf("core-en", "india"),
+                frozenSnapshot.configuration.receivedTimestampEpochMs,
+                frozenSnapshot.configuration.receivedTimestampProvenance,
+                source.admittedAt,
+                SmsModelIdentity(false, null, null),
+                "llama.cpp-jni",
+                any(),
+                parent.stableEventId,
+                parent.id,
+                any(),
+                true
+            )
+        }
+        coVerify(exactly = 1) { coordinator.process(any(), retrySnapshot, any()) }
+        coVerify(exactly = 0) { coordinator.processAdmitted(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { coordinator.currentModelIdentity() }
+        verify(exactly = 0) { coordinator.modelIdentityForLease(any()) }
+    }
+
+    @Test
+    fun `original retry for retired historical config contracts fails closed cleanly`() = runTest {
+        val source = source()
+        val parent = operation(source.id).copy(
+            state = "retain_review",
+            settledAt = 2,
+            contractReleaseId = "native-integration-v4",
+            configurationJson = """{"contract":"pocketfinancer.processing-config/4"}"""
+        )
+        coEvery { store.retryContext("review-id") } returns SmsReviewRetryContext(
+            "review-id",
+            source,
+            parent
+        )
+
+        val result = assertIs<PipelineService.ProcessingResult.Failure>(
+            pipeline.retryReview("review-id", "original")
+        )
+
+        assertFalse(result.retryable)
+        assertNoNewExtraction()
+    }
+
+    private fun assertNoNewExtraction() {
+        coVerify(exactly = 0) {
+            snapshotFactory.create(
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any()
+            )
+        }
+        coVerify(exactly = 0) { coordinator.processAdmitted(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { coordinator.currentModelIdentity() }
+        verify(exactly = 0) { coordinator.modelIdentityForLease(any()) }
+    }
+
+    private fun source(): AdmittedSmsSourceEntity {
+        val sms = message()
+        val identity = sms.sourceIdentity
+        return AdmittedSmsSourceEntity(
+            identity.opaqueCandidateKey,
+            identity.connector,
+            identity.messageId,
+            identity.providerMessageId,
+            identity.fallbackFingerprint,
+            null,
+            sms.address,
+            sms.body,
+            sms.sourceTimestamp,
+            sms.type,
+            "manual",
+            "receipt-id",
+            sms.date,
+            "admitted"
+        )
+    }
+
+    private fun operation(sourceId: String = "synthetic-source") = SmsProcessingOperationEntity(
+        snapshot.operationId,
+        sourceId,
+        null,
+        snapshot.stableEventId,
+        "manual",
+        "{}",
+        "a".repeat(64),
+        SmsContractAssets.RELEASE_ID,
+        "ready",
+        0,
+        null,
+        0,
+        null,
+        1,
+        1,
+        null,
+        null,
+        0
     )
 
-    private fun extractedTransaction() = ExtractionParser.ExtractedTransaction(
-        amount = 500.0,
-        counterparty = "UPI Ref 12345",
-        type = TransactionType.CREDIT,
-        account = "A/c XX0000"
+    private fun observerEvent(
+        transient: SmsProcessingTransientEvent
+    ) = SmsProcessingObserverEvent(
+        operationId = snapshot.operationId,
+        sequence = -1,
+        stage = "selector_execution",
+        status = "running",
+        reasonCodes = emptyList(),
+        transient = transient
     )
+
+    private fun message() = SmsReader.SmsMessage(
+        address = "SYNTH",
+        body = "INR 10 was debited from account **1234 at SYNTH SHOP.",
+        date = 1_700_000_000_000,
+        type = 1,
+        providerMessageId = "synthetic-provider-id"
+    )
+
+    private fun snapshot(): SmsOperationSnapshot {
+        val operationId = "11111111-1111-4111-8111-111111111111"
+        return SmsOperationSnapshot(
+            operationId = operationId,
+            parentOperationId = null,
+            stableEventId = "22222222-2222-4222-8222-222222222222",
+            configuration = SmsOperationConfiguration(
+                operationId = operationId,
+                parentOperationId = null,
+                sourceId = "synthetic-source",
+                sourceRefHash = "a".repeat(64),
+                trigger = "manual",
+                createdAtEpochMs = 1_700_000_000_000,
+                admissionTimestampEpochMs = 1_700_000_000_000,
+                receivedTimestampEpochMs = 1_700_000_000_000,
+                receivedTimestampProvenance = "acquisition_supplied_message_time",
+                timezoneId = "UTC",
+                primaryCurrency = "INR",
+                enabledProfiles = listOf("core-en", "india"),
+                releaseManifestHash = SmsContractAssets.MANIFEST_SHA256,
+                currencyAssetHash = "c".repeat(64),
+                profileAssetHashes = emptyMap(),
+                extractorEligible = true,
+                extractorIneligibilityReason = null,
+                modelIdentifier = "test-selector",
+                modelFileSha256 = "a".repeat(64),
+                modelIdentityKind = "file_sha256",
+                runtimeVersion = "test-runtime",
+                osVersion = "test-os",
+                deviceCohort = "test-device",
+                promptHash = "d".repeat(64),
+                grammarHash = "e".repeat(64),
+                grammarEnabled = false,
+                validationProfileHash = "f".repeat(64),
+                rolloutMode = "automatic"
+            ),
+            configurationJson = "{}",
+            configurationHash = "e".repeat(64)
+        )
+    }
 }

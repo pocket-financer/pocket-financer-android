@@ -1,0 +1,1740 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 6,
+    "identityHash": "c7bd0c9194ee31997eee030bb900ff70",
+    "entities": [
+      {
+        "tableName": "transactions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `amount` REAL NOT NULL, `merchant` TEXT NOT NULL, `date` INTEGER NOT NULL, `type` TEXT NOT NULL, `accountId` TEXT NOT NULL, `rawMessage` TEXT NOT NULL, `sender` TEXT NOT NULL, `isEdited` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `slmPromptEvalMs` INTEGER, `slmEvalMs` INTEGER, `slmNumTokens` INTEGER, `slmModelName` TEXT, `sourceConnector` TEXT NOT NULL, `sourceProviderMessageId` TEXT, `sourceMessageId` TEXT NOT NULL, `sourceFingerprint` TEXT NOT NULL, `sourceAlternateFingerprint` TEXT, `sourceId` TEXT, `sourceEventId` TEXT, `exactMinorUnits` INTEGER, `currencyCode` TEXT, `currencyScale` INTEGER, `currencyProvenance` TEXT, `timestampProvenance` TEXT, `currentRevisionId` TEXT, `projectionState` TEXT NOT NULL DEFAULT 'legacy', `legacyPrecisionStatus` TEXT NOT NULL DEFAULT 'legacy_double_original_precision_unknown', PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amount",
+            "columnName": "amount",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "merchant",
+            "columnName": "merchant",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "date",
+            "columnName": "date",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "type",
+            "columnName": "type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawMessage",
+            "columnName": "rawMessage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sender",
+            "columnName": "sender",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isEdited",
+            "columnName": "isEdited",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "slmPromptEvalMs",
+            "columnName": "slmPromptEvalMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "slmEvalMs",
+            "columnName": "slmEvalMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "slmNumTokens",
+            "columnName": "slmNumTokens",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "slmModelName",
+            "columnName": "slmModelName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceConnector",
+            "columnName": "sourceConnector",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceProviderMessageId",
+            "columnName": "sourceProviderMessageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceMessageId",
+            "columnName": "sourceMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceFingerprint",
+            "columnName": "sourceFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceAlternateFingerprint",
+            "columnName": "sourceAlternateFingerprint",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceEventId",
+            "columnName": "sourceEventId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "exactMinorUnits",
+            "columnName": "exactMinorUnits",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "currencyCode",
+            "columnName": "currencyCode",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "currencyScale",
+            "columnName": "currencyScale",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "currencyProvenance",
+            "columnName": "currencyProvenance",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "timestampProvenance",
+            "columnName": "timestampProvenance",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "currentRevisionId",
+            "columnName": "currentRevisionId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "projectionState",
+            "columnName": "projectionState",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'legacy'"
+          },
+          {
+            "fieldPath": "legacyPrecisionStatus",
+            "columnName": "legacyPrecisionStatus",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'legacy_double_original_precision_unknown'"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transactions_accountId",
+            "unique": false,
+            "columnNames": [
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_accountId` ON `${TABLE_NAME}` (`accountId`)"
+          },
+          {
+            "name": "index_transactions_date",
+            "unique": false,
+            "columnNames": [
+              "date"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_date` ON `${TABLE_NAME}` (`date`)"
+          },
+          {
+            "name": "index_transactions_type",
+            "unique": false,
+            "columnNames": [
+              "type"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_type` ON `${TABLE_NAME}` (`type`)"
+          },
+          {
+            "name": "index_transactions_sourceConnector_sourceMessageId_sourceEventId",
+            "unique": true,
+            "columnNames": [
+              "sourceConnector",
+              "sourceMessageId",
+              "sourceEventId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_transactions_sourceConnector_sourceMessageId_sourceEventId` ON `${TABLE_NAME}` (`sourceConnector`, `sourceMessageId`, `sourceEventId`)"
+          },
+          {
+            "name": "index_transactions_sourceConnector_sourceFingerprint",
+            "unique": false,
+            "columnNames": [
+              "sourceConnector",
+              "sourceFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_sourceConnector_sourceFingerprint` ON `${TABLE_NAME}` (`sourceConnector`, `sourceFingerprint`)"
+          },
+          {
+            "name": "index_transactions_sourceConnector_sourceAlternateFingerprint",
+            "unique": false,
+            "columnNames": [
+              "sourceConnector",
+              "sourceAlternateFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_sourceConnector_sourceAlternateFingerprint` ON `${TABLE_NAME}` (`sourceConnector`, `sourceAlternateFingerprint`)"
+          }
+        ]
+      },
+      {
+        "tableName": "accounts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `bank` TEXT NOT NULL, `type` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bank",
+            "columnName": "bank",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "type",
+            "columnName": "type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "queued_sms_candidates",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`candidateKey` TEXT NOT NULL, `sourceConnector` TEXT NOT NULL, `sourceMessageId` TEXT NOT NULL, `sourceFingerprint` TEXT NOT NULL, `sourceAlternateFingerprint` TEXT, `sourceProviderMessageId` TEXT, `sender` TEXT NOT NULL, `rawMessage` TEXT NOT NULL, `date` INTEGER NOT NULL, `sourceTimestamp` INTEGER NOT NULL, `messageType` INTEGER NOT NULL, `origin` TEXT NOT NULL, `state` TEXT NOT NULL, `claimToken` TEXT, `claimedAt` INTEGER, `attemptCount` INTEGER NOT NULL, `lastError` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`candidateKey`))",
+        "fields": [
+          {
+            "fieldPath": "candidateKey",
+            "columnName": "candidateKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceConnector",
+            "columnName": "sourceConnector",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceMessageId",
+            "columnName": "sourceMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceFingerprint",
+            "columnName": "sourceFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceAlternateFingerprint",
+            "columnName": "sourceAlternateFingerprint",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceProviderMessageId",
+            "columnName": "sourceProviderMessageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sender",
+            "columnName": "sender",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawMessage",
+            "columnName": "rawMessage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "date",
+            "columnName": "date",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceTimestamp",
+            "columnName": "sourceTimestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageType",
+            "columnName": "messageType",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "claimToken",
+            "columnName": "claimToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "claimedAt",
+            "columnName": "claimedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "candidateKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_queued_sms_candidates_sourceConnector_sourceMessageId",
+            "unique": true,
+            "columnNames": [
+              "sourceConnector",
+              "sourceMessageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_queued_sms_candidates_sourceConnector_sourceMessageId` ON `${TABLE_NAME}` (`sourceConnector`, `sourceMessageId`)"
+          },
+          {
+            "name": "index_queued_sms_candidates_sourceConnector_sourceFingerprint",
+            "unique": false,
+            "columnNames": [
+              "sourceConnector",
+              "sourceFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queued_sms_candidates_sourceConnector_sourceFingerprint` ON `${TABLE_NAME}` (`sourceConnector`, `sourceFingerprint`)"
+          },
+          {
+            "name": "index_queued_sms_candidates_sourceConnector_sourceAlternateFingerprint",
+            "unique": false,
+            "columnNames": [
+              "sourceConnector",
+              "sourceAlternateFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queued_sms_candidates_sourceConnector_sourceAlternateFingerprint` ON `${TABLE_NAME}` (`sourceConnector`, `sourceAlternateFingerprint`)"
+          },
+          {
+            "name": "index_queued_sms_candidates_origin_state",
+            "unique": false,
+            "columnNames": [
+              "origin",
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queued_sms_candidates_origin_state` ON `${TABLE_NAME}` (`origin`, `state`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_admitted_sources",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `sourceConnector` TEXT NOT NULL, `sourceMessageId` TEXT NOT NULL, `sourceProviderMessageId` TEXT, `sourceFingerprint` TEXT NOT NULL, `sourceAlternateFingerprint` TEXT, `sender` TEXT NOT NULL, `rawMessage` TEXT NOT NULL, `sourceTimestamp` INTEGER, `messageType` INTEGER, `origin` TEXT NOT NULL, `admissionReceiptId` TEXT NOT NULL, `admittedAt` INTEGER NOT NULL, `retentionState` TEXT NOT NULL, `deletionEpoch` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceConnector",
+            "columnName": "sourceConnector",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceMessageId",
+            "columnName": "sourceMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceProviderMessageId",
+            "columnName": "sourceProviderMessageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceFingerprint",
+            "columnName": "sourceFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceAlternateFingerprint",
+            "columnName": "sourceAlternateFingerprint",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sender",
+            "columnName": "sender",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawMessage",
+            "columnName": "rawMessage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceTimestamp",
+            "columnName": "sourceTimestamp",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "messageType",
+            "columnName": "messageType",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "admissionReceiptId",
+            "columnName": "admissionReceiptId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "admittedAt",
+            "columnName": "admittedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retentionState",
+            "columnName": "retentionState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deletionEpoch",
+            "columnName": "deletionEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_admitted_sources_sourceConnector_sourceMessageId",
+            "unique": true,
+            "columnNames": [
+              "sourceConnector",
+              "sourceMessageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sms_admitted_sources_sourceConnector_sourceMessageId` ON `${TABLE_NAME}` (`sourceConnector`, `sourceMessageId`)"
+          },
+          {
+            "name": "index_sms_admitted_sources_sourceConnector_sourceProviderMessageId",
+            "unique": false,
+            "columnNames": [
+              "sourceConnector",
+              "sourceProviderMessageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sms_admitted_sources_sourceConnector_sourceProviderMessageId` ON `${TABLE_NAME}` (`sourceConnector`, `sourceProviderMessageId`)"
+          },
+          {
+            "name": "index_sms_admitted_sources_retentionState",
+            "unique": false,
+            "columnNames": [
+              "retentionState"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sms_admitted_sources_retentionState` ON `${TABLE_NAME}` (`retentionState`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_source_metadata_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `sequence` INTEGER NOT NULL, `kind` TEXT NOT NULL, `payloadJson` TEXT NOT NULL, `occurredAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sequence",
+            "columnName": "sequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "payloadJson",
+            "columnName": "payloadJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "occurredAt",
+            "columnName": "occurredAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_source_metadata_events_sourceId_sequence",
+            "unique": true,
+            "columnNames": [
+              "sourceId",
+              "sequence"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sms_source_metadata_events_sourceId_sequence` ON `${TABLE_NAME}` (`sourceId`, `sequence`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_processing_operations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `parentOperationId` TEXT, `stableEventId` TEXT NOT NULL, `trigger` TEXT NOT NULL, `configurationJson` TEXT NOT NULL, `configurationHash` TEXT NOT NULL, `contractReleaseId` TEXT NOT NULL, `state` TEXT NOT NULL, `transitionSequence` INTEGER NOT NULL, `ownerToken` TEXT, `ownerGeneration` INTEGER NOT NULL, `claimExpiresAt` INTEGER, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `settledAt` INTEGER, `settlementReceiptJson` TEXT, `deletionEpoch` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentOperationId",
+            "columnName": "parentOperationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "stableEventId",
+            "columnName": "stableEventId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trigger",
+            "columnName": "trigger",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "configurationJson",
+            "columnName": "configurationJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "configurationHash",
+            "columnName": "configurationHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contractReleaseId",
+            "columnName": "contractReleaseId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transitionSequence",
+            "columnName": "transitionSequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerToken",
+            "columnName": "ownerToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "ownerGeneration",
+            "columnName": "ownerGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "claimExpiresAt",
+            "columnName": "claimExpiresAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "settledAt",
+            "columnName": "settledAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "settlementReceiptJson",
+            "columnName": "settlementReceiptJson",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "deletionEpoch",
+            "columnName": "deletionEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_processing_operations_sourceId_createdAt",
+            "unique": false,
+            "columnNames": [
+              "sourceId",
+              "createdAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sms_processing_operations_sourceId_createdAt` ON `${TABLE_NAME}` (`sourceId`, `createdAt`)"
+          },
+          {
+            "name": "index_sms_processing_operations_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sms_processing_operations_state` ON `${TABLE_NAME}` (`state`)"
+          },
+          {
+            "name": "index_sms_processing_operations_parentOperationId",
+            "unique": false,
+            "columnNames": [
+              "parentOperationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sms_processing_operations_parentOperationId` ON `${TABLE_NAME}` (`parentOperationId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_processing_analyses",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `operationId` TEXT NOT NULL, `analysisId` TEXT NOT NULL, `contractVersion` TEXT NOT NULL, `sourceHash` TEXT NOT NULL, `configurationHash` TEXT NOT NULL, `canonicalJson` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "analysisId",
+            "columnName": "analysisId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contractVersion",
+            "columnName": "contractVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceHash",
+            "columnName": "sourceHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "configurationHash",
+            "columnName": "configurationHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "canonicalJson",
+            "columnName": "canonicalJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_processing_analyses_operationId",
+            "unique": true,
+            "columnNames": [
+              "operationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sms_processing_analyses_operationId` ON `${TABLE_NAME}` (`operationId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_selector_attempts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `operationId` TEXT NOT NULL, `attemptIndex` INTEGER NOT NULL, `runtimeProfileJson` TEXT NOT NULL, `requestJson` TEXT NOT NULL, `rawOutput` TEXT, `outputByteCount` INTEGER, `completion` TEXT NOT NULL, `validatedSelectionJson` TEXT, `safeErrorCode` TEXT, `startedAt` INTEGER NOT NULL, `completedAt` INTEGER, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptIndex",
+            "columnName": "attemptIndex",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "runtimeProfileJson",
+            "columnName": "runtimeProfileJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requestJson",
+            "columnName": "requestJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawOutput",
+            "columnName": "rawOutput",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "outputByteCount",
+            "columnName": "outputByteCount",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "completion",
+            "columnName": "completion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validatedSelectionJson",
+            "columnName": "validatedSelectionJson",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "safeErrorCode",
+            "columnName": "safeErrorCode",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "startedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedAt",
+            "columnName": "completedAt",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_selector_attempts_operationId_attemptIndex",
+            "unique": true,
+            "columnNames": [
+              "operationId",
+              "attemptIndex"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sms_selector_attempts_operationId_attemptIndex` ON `${TABLE_NAME}` (`operationId`, `attemptIndex`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_processing_trace_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `operationId` TEXT NOT NULL, `sequence` INTEGER NOT NULL, `occurredAt` INTEGER NOT NULL, `stage` TEXT NOT NULL, `status` TEXT NOT NULL, `reasonCodesJson` TEXT NOT NULL, `detailJson` TEXT, `previousEventHash` TEXT, `eventHash` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sequence",
+            "columnName": "sequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "occurredAt",
+            "columnName": "occurredAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stage",
+            "columnName": "stage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reasonCodesJson",
+            "columnName": "reasonCodesJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "detailJson",
+            "columnName": "detailJson",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "previousEventHash",
+            "columnName": "previousEventHash",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "eventHash",
+            "columnName": "eventHash",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_processing_trace_events_operationId_sequence",
+            "unique": true,
+            "columnNames": [
+              "operationId",
+              "sequence"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sms_processing_trace_events_operationId_sequence` ON `${TABLE_NAME}` (`operationId`, `sequence`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_reconstructed_results",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `operationId` TEXT NOT NULL, `contractVersion` TEXT NOT NULL, `recognitionDecision` TEXT NOT NULL, `semanticResultJson` TEXT, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contractVersion",
+            "columnName": "contractVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recognitionDecision",
+            "columnName": "recognitionDecision",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "semanticResultJson",
+            "columnName": "semanticResultJson",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_reconstructed_results_operationId",
+            "unique": true,
+            "columnNames": [
+              "operationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sms_reconstructed_results_operationId` ON `${TABLE_NAME}` (`operationId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_persistence_decisions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `operationId` TEXT NOT NULL, `result` TEXT NOT NULL, `primaryReason` TEXT NOT NULL, `checksJson` TEXT NOT NULL, `accountResolutionJson` TEXT NOT NULL, `rolloutMode` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "result",
+            "columnName": "result",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "primaryReason",
+            "columnName": "primaryReason",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "checksJson",
+            "columnName": "checksJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountResolutionJson",
+            "columnName": "accountResolutionJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rolloutMode",
+            "columnName": "rolloutMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_persistence_decisions_operationId",
+            "unique": true,
+            "columnNames": [
+              "operationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sms_persistence_decisions_operationId` ON `${TABLE_NAME}` (`operationId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_review_cases",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `currentOperationId` TEXT NOT NULL, `state` TEXT NOT NULL, `revision` INTEGER NOT NULL, `reasonCodesJson` TEXT NOT NULL, `draftJson` TEXT, `stableEventIdsJson` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currentOperationId",
+            "columnName": "currentOperationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reasonCodesJson",
+            "columnName": "reasonCodesJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "draftJson",
+            "columnName": "draftJson",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "stableEventIdsJson",
+            "columnName": "stableEventIdsJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_review_cases_sourceId",
+            "unique": false,
+            "columnNames": [
+              "sourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sms_review_cases_sourceId` ON `${TABLE_NAME}` (`sourceId`)"
+          },
+          {
+            "name": "index_sms_review_cases_currentOperationId",
+            "unique": false,
+            "columnNames": [
+              "currentOperationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sms_review_cases_currentOperationId` ON `${TABLE_NAME}` (`currentOperationId`)"
+          },
+          {
+            "name": "index_sms_review_cases_state_updatedAt",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "updatedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sms_review_cases_state_updatedAt` ON `${TABLE_NAME}` (`state`, `updatedAt`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sms_user_feedback_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`actionId` TEXT NOT NULL, `reviewCaseId` TEXT, `operationId` TEXT, `transactionId` TEXT, `transactionRevisionId` TEXT, `expectedReviewRevision` INTEGER NOT NULL, `resultingReviewRevision` INTEGER NOT NULL, `action` TEXT NOT NULL, `actorClass` TEXT NOT NULL, `actorIdHash` TEXT NOT NULL, `correctionsJson` TEXT NOT NULL, `retryConfiguration` TEXT, `canonicalLabelId` TEXT, `canonicalLabelRevision` INTEGER, `previousEventHash` TEXT, `eventHash` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`actionId`))",
+        "fields": [
+          {
+            "fieldPath": "actionId",
+            "columnName": "actionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reviewCaseId",
+            "columnName": "reviewCaseId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "transactionId",
+            "columnName": "transactionId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "transactionRevisionId",
+            "columnName": "transactionRevisionId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "expectedReviewRevision",
+            "columnName": "expectedReviewRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resultingReviewRevision",
+            "columnName": "resultingReviewRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actorClass",
+            "columnName": "actorClass",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actorIdHash",
+            "columnName": "actorIdHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "correctionsJson",
+            "columnName": "correctionsJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retryConfiguration",
+            "columnName": "retryConfiguration",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "canonicalLabelId",
+            "columnName": "canonicalLabelId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "canonicalLabelRevision",
+            "columnName": "canonicalLabelRevision",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "previousEventHash",
+            "columnName": "previousEventHash",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "eventHash",
+            "columnName": "eventHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "actionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sms_user_feedback_events_reviewCaseId_resultingReviewRevision",
+            "unique": true,
+            "columnNames": [
+              "reviewCaseId",
+              "resultingReviewRevision"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sms_user_feedback_events_reviewCaseId_resultingReviewRevision` ON `${TABLE_NAME}` (`reviewCaseId`, `resultingReviewRevision`)"
+          },
+          {
+            "name": "index_sms_user_feedback_events_transactionId_resultingReviewRevision",
+            "unique": true,
+            "columnNames": [
+              "transactionId",
+              "resultingReviewRevision"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sms_user_feedback_events_transactionId_resultingReviewRevision` ON `${TABLE_NAME}` (`transactionId`, `resultingReviewRevision`)"
+          }
+        ]
+      },
+      {
+        "tableName": "transaction_revisions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `transactionId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `stableEventId` TEXT NOT NULL, `revision` INTEGER NOT NULL, `previousRevisionId` TEXT, `operationId` TEXT, `feedbackActionId` TEXT, `exactMinorUnits` INTEGER, `currencyCode` TEXT, `currencyScale` INTEGER, `direction` TEXT, `merchant` TEXT, `accountId` TEXT, `occurredAt` INTEGER, `provenance` TEXT NOT NULL, `isCurrentProjection` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transactionId",
+            "columnName": "transactionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stableEventId",
+            "columnName": "stableEventId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "previousRevisionId",
+            "columnName": "previousRevisionId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "feedbackActionId",
+            "columnName": "feedbackActionId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "exactMinorUnits",
+            "columnName": "exactMinorUnits",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "currencyCode",
+            "columnName": "currencyCode",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "currencyScale",
+            "columnName": "currencyScale",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "merchant",
+            "columnName": "merchant",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "occurredAt",
+            "columnName": "occurredAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "provenance",
+            "columnName": "provenance",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCurrentProjection",
+            "columnName": "isCurrentProjection",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transaction_revisions_transactionId_revision",
+            "unique": true,
+            "columnNames": [
+              "transactionId",
+              "revision"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_transaction_revisions_transactionId_revision` ON `${TABLE_NAME}` (`transactionId`, `revision`)"
+          },
+          {
+            "name": "index_transaction_revisions_sourceId_stableEventId_revision",
+            "unique": true,
+            "columnNames": [
+              "sourceId",
+              "stableEventId",
+              "revision"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_transaction_revisions_sourceId_stableEventId_revision` ON `${TABLE_NAME}` (`sourceId`, `stableEventId`, `revision`)"
+          }
+        ]
+      },
+      {
+        "tableName": "account_aliases",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `accountId` TEXT NOT NULL, `normalizedAliasHash` TEXT NOT NULL, `aliasKind` TEXT NOT NULL, `matchingScope` TEXT NOT NULL, `confirmedByUser` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "normalizedAliasHash",
+            "columnName": "normalizedAliasHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "aliasKind",
+            "columnName": "aliasKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "matchingScope",
+            "columnName": "matchingScope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confirmedByUser",
+            "columnName": "confirmedByUser",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_account_aliases_accountId",
+            "unique": false,
+            "columnNames": [
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_account_aliases_accountId` ON `${TABLE_NAME}` (`accountId`)"
+          },
+          {
+            "name": "index_account_aliases_normalizedAliasHash_matchingScope",
+            "unique": true,
+            "columnNames": [
+              "normalizedAliasHash",
+              "matchingScope"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_account_aliases_normalizedAliasHash_matchingScope` ON `${TABLE_NAME}` (`normalizedAliasHash`, `matchingScope`)"
+          }
+        ]
+      },
+      {
+        "tableName": "legacy_transaction_snapshots",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`transactionId` TEXT NOT NULL, `legacyAmount` REAL NOT NULL, `merchant` TEXT NOT NULL, `occurredAt` INTEGER NOT NULL, `direction` TEXT NOT NULL, `accountId` TEXT NOT NULL, `rawMessage` TEXT NOT NULL, `sender` TEXT NOT NULL, `wasEdited` INTEGER NOT NULL, `originalEditHistoryKnown` INTEGER NOT NULL, `capturedAt` INTEGER NOT NULL, PRIMARY KEY(`transactionId`))",
+        "fields": [
+          {
+            "fieldPath": "transactionId",
+            "columnName": "transactionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "legacyAmount",
+            "columnName": "legacyAmount",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "merchant",
+            "columnName": "merchant",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "occurredAt",
+            "columnName": "occurredAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawMessage",
+            "columnName": "rawMessage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sender",
+            "columnName": "sender",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "wasEdited",
+            "columnName": "wasEdited",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalEditHistoryKnown",
+            "columnName": "originalEditHistoryKnown",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capturedAt",
+            "columnName": "capturedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "transactionId"
+          ]
+        }
+      },
+      {
+        "tableName": "sms_trace_import_receipts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`transferId` TEXT NOT NULL, `manifestHash` TEXT NOT NULL, `sourcePlatform` TEXT NOT NULL, `consentedAt` INTEGER NOT NULL, `importedAt` INTEGER NOT NULL, `operationCount` INTEGER NOT NULL, `provenance` TEXT NOT NULL, PRIMARY KEY(`transferId`))",
+        "fields": [
+          {
+            "fieldPath": "transferId",
+            "columnName": "transferId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "manifestHash",
+            "columnName": "manifestHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourcePlatform",
+            "columnName": "sourcePlatform",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "consentedAt",
+            "columnName": "consentedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "importedAt",
+            "columnName": "importedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationCount",
+            "columnName": "operationCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "provenance",
+            "columnName": "provenance",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "transferId"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'c7bd0c9194ee31997eee030bb900ff70')"
+    ]
+  }
+}

@@ -1,5 +1,9 @@
 # Android Emulator Testing Commands Reference
 
+> This is a command reference, not evidence that current SMS behavior passed.
+> Record each fresh run separately and use
+> [sms-processing-next-steps.md](sms-processing-next-steps.md) for the active gate.
+
 This document compiles the exact commands, scripts, coordinates, and navigation targets used to build, install, debug, and interact with the application on the Android emulator (`emulator-5554`).
 
 > [!NOTE]
@@ -43,7 +47,8 @@ python inject_sms.py
 *After injection:*
 1. Open the app on the emulator.
 2. Under the **Home** tab, tap the **Process** button on the "Unsynced Messages" banner.
-3. Tap **Inspect** to open the "On-Device Local SLM Monitor" bottom sheet to track progress in real-time.
+3. Tap **Inspect** to open the local processing monitor and verify the actual
+   observable stages, including live decoded output when inference runs.
 
 ---
 

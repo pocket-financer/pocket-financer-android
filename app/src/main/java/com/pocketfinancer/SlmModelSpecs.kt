@@ -23,7 +23,6 @@ fun SlmTier.toModelSpec(
         contextSize = 3072,
         gpuLayers = 0,
         numThreads = 0,
-        hasFp16 = device.cpu?.hasFp16 ?: false,
-        hasThinkingMode = hasThinkingMode
+        hasFp16 = device.cpu?.hasFp16 ?: false
     )
 }

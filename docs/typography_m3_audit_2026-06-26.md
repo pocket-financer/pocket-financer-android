@@ -13,7 +13,7 @@
 - [InsightsScreen.kt](../app/src/main/java/com/pocketfinancer/ui/insights/InsightsScreen.kt) — exemplary pattern
 - [OnboardingScreen.kt](../app/src/main/java/com/pocketfinancer/ui/onboarding/OnboardingScreen.kt) — inline overrides
 - [SettingsScreen.kt](../app/src/main/java/com/pocketfinancer/ui/settings/SettingsScreen.kt) — mixed pattern
-- [TelemetryLogsViewer.kt](../app/src/main/java/com/pocketfinancer/ui/transactions/TelemetryLogsViewer.kt) — inline overrides
+- [SmsTelemetryViewer.kt](../app/src/main/java/com/pocketfinancer/ui/smsprocessing/SmsTelemetryViewer.kt) — current location of the telemetry viewer
 
 **Reference:** [M3 Typography / Type Scale Tokens](https://m3.material.io/styles/typography/type-scale-tokens)
 

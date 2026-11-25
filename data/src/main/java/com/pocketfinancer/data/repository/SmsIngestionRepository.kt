@@ -3,13 +3,16 @@ package com.pocketfinancer.data.repository
 import androidx.room.withTransaction
 import com.pocketfinancer.data.db.AppDatabase
 import com.pocketfinancer.data.db.dao.QueuedSmsCandidateDao
+import com.pocketfinancer.data.db.dao.SmsProcessingDao
 import com.pocketfinancer.data.db.dao.TransactionDao
+import com.pocketfinancer.data.db.entity.AdmittedSmsSourceEntity
 import com.pocketfinancer.data.db.entity.QueuedSmsCandidateEntity
 import com.pocketfinancer.data.model.QueuedSmsCandidate
 import com.pocketfinancer.data.model.SmsCandidateOrigin
 import com.pocketfinancer.data.model.SmsSourceIdentity
 import javax.inject.Inject
 import javax.inject.Singleton
+import java.util.UUID
 
 /**
  * Owns the encrypted handoff between SMS admission, WorkManager, and ledger
@@ -19,7 +22,8 @@ import javax.inject.Singleton
 class SmsIngestionRepository @Inject constructor(
     private val appDatabase: AppDatabase,
     private val transactionDao: TransactionDao,
-    private val candidateDao: QueuedSmsCandidateDao
+    private val candidateDao: QueuedSmsCandidateDao,
+    private val processingDao: SmsProcessingDao
 ) {
     sealed interface AdmissionResult {
         val candidateKey: String
@@ -48,6 +52,7 @@ class SmsIngestionRepository @Inject constructor(
     suspend fun admit(candidate: NewCandidate): AdmissionResult =
         appDatabase.withTransaction {
             val source = candidate.sourceIdentity
+            val now = System.currentTimeMillis()
             val existingTransaction = transactionDao.findBySource(
                 connector = source.connector,
                 messageId = source.messageId,
@@ -79,7 +84,6 @@ class SmsIngestionRepository @Inject constructor(
                 )
             }
 
-            val now = System.currentTimeMillis()
             val existingCandidate = candidateDao.findBySource(
                 connector = source.connector,
                 messageId = source.messageId,
@@ -98,8 +102,28 @@ class SmsIngestionRepository @Inject constructor(
                     sourceTimestamp = candidate.sourceTimestamp,
                     updatedAt = now
                 )
+                processingDao.preserveAdmittedSourceMetadata(
+                    sourceId = existingCandidate.candidateKey,
+                    messageId = source.messageId,
+                    providerMessageId = source.providerMessageId,
+                    alternateFingerprint = source.alternateFingerprint
+                )
                 return@withTransaction AdmissionResult.Admitted(
                     candidateKey = existingCandidate.candidateKey,
+                    newlyCreated = false
+                )
+            }
+
+            val settledTombstone = processingDao.getSourceByIdentity(
+                source.connector,
+                source.messageId
+            )?.takeIf {
+                it.retentionState in SmsProcessingStore.TOMBSTONE_RETENTION_STATES &&
+                    it.sourceFingerprint == source.fallbackFingerprint
+            }
+            if (settledTombstone != null) {
+                return@withTransaction AdmissionResult.Admitted(
+                    candidateKey = settledTombstone.id,
                     newlyCreated = false
                 )
             }
@@ -122,6 +146,26 @@ class SmsIngestionRepository @Inject constructor(
             )
             val rowId = candidateDao.insertIgnore(entity)
             if (rowId != -1L) {
+                processingDao.insertSource(
+                    AdmittedSmsSourceEntity(
+                        id = source.opaqueCandidateKey,
+                        sourceConnector = source.connector,
+                        sourceMessageId = source.messageId,
+                        sourceProviderMessageId = source.providerMessageId,
+                        sourceFingerprint = source.fallbackFingerprint,
+                        sourceAlternateFingerprint = source.alternateFingerprint,
+                        sender = candidate.sender,
+                        rawMessage = candidate.rawMessage,
+                        sourceTimestamp = candidate.sourceTimestamp,
+                        messageType = candidate.messageType,
+                        origin = candidate.origin.persistedValue,
+                        admissionReceiptId = UUID.nameUUIDFromBytes(
+                            source.opaqueCandidateKey.toByteArray(Charsets.UTF_8)
+                        ).toString(),
+                        admittedAt = now,
+                        retentionState = "admitted"
+                    )
+                )
                 return@withTransaction AdmissionResult.Admitted(
                     candidateKey = entity.candidateKey,
                     newlyCreated = true
@@ -146,6 +190,12 @@ class SmsIngestionRepository @Inject constructor(
                 date = candidate.date,
                 sourceTimestamp = candidate.sourceTimestamp,
                 updatedAt = now
+            )
+            processingDao.preserveAdmittedSourceMetadata(
+                sourceId = conflictingCandidate.candidateKey,
+                messageId = source.messageId,
+                providerMessageId = source.providerMessageId,
+                alternateFingerprint = source.alternateFingerprint
             )
             AdmissionResult.Admitted(
                 candidateKey = conflictingCandidate.candidateKey,

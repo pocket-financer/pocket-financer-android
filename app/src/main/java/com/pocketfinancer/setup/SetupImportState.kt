@@ -27,6 +27,7 @@ data class SetupImportState(
     val processedCount: Int = 0,
     val savedCount: Int = 0,
     val rejectedCount: Int = 0,
+    val retainedReviewCount: Int = 0,
     val failedCount: Int = 0,
     val lastSuccessfulScanMillis: Long? = null,
     /**

@@ -306,6 +306,37 @@ class SmsProcessingComposeUiTest {
     }
 
     @Test
+    fun telemetryViewer_streamsModelOutputWithoutSeparateDeltaPanel() {
+        val model = candidateTelemetryModel(
+            target = SmsProcessingTarget.ManualRecent(
+                runId = "live-output-run",
+                candidateKey = "live-output-candidate"
+            ),
+            sender = "VK-BANK",
+            body = "INR 1,234.00 spent locally"
+        ).copy(
+            activeStageIndex = 1,
+            decodedTokenDelta = "\"posted\"}",
+            jsonOutput = "{\"decision\":\"posted\"}"
+        )
+
+        composeRule.setContent {
+            PocketFinancerTheme {
+                TelemetryLogsViewer(
+                    model = model,
+                    onStop = {},
+                    onClose = {}
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("Latest decoded token delta").assertDoesNotExist()
+        composeRule.onNodeWithText("Live model output").assertExists()
+        composeRule.onNodeWithText("{\"decision\":\"posted\"}").assertExists()
+    }
+
+    @Test
     fun activityCard_narrowWidthAndLargeFont_controlsRemainDiscoverable() {
         composeRule.setContent {
             val density = LocalDensity.current
@@ -576,9 +607,7 @@ class SmsProcessingComposeUiTest {
         ),
         phase = SmsPipelinePhase.PROCESSING,
         status = SmsTelemetryStatus.ACTIVE,
-        hasThinkingMode = true,
         activeStageIndex = 0,
-        thinkingOutput = "",
         jsonOutput = "",
         filterLogs = listOf("Checking local message"),
         cacheLogs = emptyList(),
