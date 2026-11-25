@@ -29,6 +29,71 @@ class AppDatabaseMigrationTest {
     )
 
     @Test
+    fun `v1 through v8 consecutive migration preserves accounts and transactions`() {
+        migrationHelper.createDatabase(V1_DATABASE_NAME, 1).apply {
+            execSQL(
+                """
+                INSERT INTO accounts (id, name, bank, type, createdAt, updatedAt)
+                VALUES ('v1-acct', 'A/c XX1234', 'Synthetic Bank', 'auto-extracted', 100, 100)
+                """.trimIndent()
+            )
+            execSQL(
+                """
+                INSERT INTO transactions (
+                    id, amount, merchant, date, type, accountId, rawMessage, sender,
+                    createdAt, updatedAt
+                ) VALUES (
+                    'v1-tx', 450.5, 'Synthetic Mart', $RECEIVED_AT, 'debit', 'v1-acct',
+                    '$DUPLICATE_BODY', '$TEST_SENDER', 100, 100
+                )
+                """.trimIndent()
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            V1_DATABASE_NAME,
+            8,
+            true,
+            AppDatabase.MIGRATION_1_2,
+            AppDatabase.MIGRATION_2_3,
+            AppDatabase.MIGRATION_3_4,
+            AppDatabase.MIGRATION_4_5,
+            AppDatabase.MIGRATION_5_6,
+            AppDatabase.MIGRATION_6_7,
+            AppDatabase.MIGRATION_7_8
+        )
+
+        migrated.query(
+            """
+            SELECT id, amount, merchant, isEdited, projectionState, legacyPrecisionStatus,
+                   currentRevisionId, slmModelName
+            FROM transactions
+            WHERE id = 'v1-tx'
+            """.trimIndent()
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("v1-tx", cursor.getString(0))
+            assertEquals(450.5, cursor.getDouble(1))
+            assertEquals("Synthetic Mart", cursor.getString(2))
+            assertEquals(0, cursor.getInt(3))
+            assertEquals("legacy", cursor.getString(4))
+            assertEquals("legacy_double_original_precision_unknown", cursor.getString(5))
+            assertEquals("v1-tx:legacy", cursor.getString(6))
+            assertTrue(cursor.isNull(7))
+        }
+        migrated.query("SELECT COUNT(*) FROM accounts WHERE id = 'v1-acct'").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(1, cursor.getInt(0))
+        }
+        migrated.query("SELECT COUNT(*) FROM legacy_transaction_snapshots WHERE transactionId = 'v1-tx'").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(1, cursor.getInt(0))
+        }
+        migrated.close()
+    }
+
+    @Test
     fun `v3 to v7 preserves exact duplicates with stable unique identities`() {
         migrationHelper.createDatabase(V3_DATABASE_NAME, 3).apply {
             insertV3Transaction(
@@ -517,6 +582,7 @@ class AppDatabaseMigrationTest {
     }
 
     private companion object {
+        const val V1_DATABASE_NAME = "migration-v1-v8"
         const val V3_DATABASE_NAME = "migration-v3-v6"
         const val V4_DATABASE_NAME = "migration-v4-v6"
         const val V6_DATABASE_NAME = "migration-v6-v7"

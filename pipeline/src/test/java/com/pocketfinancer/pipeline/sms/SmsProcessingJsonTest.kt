@@ -145,4 +145,24 @@ class SmsProcessingJsonTest {
         assertEquals("tombstoned_excluded", json.getString("status"))
         assertEquals(JSONObject.NULL, json.get("recognition_decision"))
     }
+
+    @Test
+    fun `sender family normalizes prefix digits and blank senders`() {
+        assertEquals("hdfcbk", SmsProcessingJson.senderFamily("AX-HDFCBK"))
+        assertEquals("bank#", SmsProcessingJson.senderFamily("  VM-Bank12345  "))
+        assertEquals("unknown", SmsProcessingJson.senderFamily("   "))
+    }
+
+    @Test
+    fun `persistence failure gate marks atomic write check failed`() {
+        val gate = SmsProcessingJson.persistenceFailureGate("persistence_atomic_write_failed")
+
+        assertEquals("review_required", gate.getString("result"))
+        assertEquals("persistence_atomic_write_failed", gate.getString("primary_reason"))
+        val checks = gate.getJSONArray("checks")
+        val lastCheck = checks.getJSONObject(checks.length() - 1)
+        assertEquals("atomic_transaction_write", lastCheck.getString("check"))
+        assertEquals(false, lastCheck.getBoolean("passed"))
+        assertEquals("persistence_atomic_write_failed", lastCheck.getString("reason_code"))
+    }
 }
