@@ -60,7 +60,7 @@ jobs:
           java-version: '17'
 
       - name: Validate Gradle wrapper and set up Gradle
-        uses: gradle/actions/setup-gradle@v6.3.0
+        uses: gradle/actions/setup-gradle@v6.4.0
         with:
           validate-wrappers: true
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
@@ -71,6 +71,8 @@ jobs:
           packages: >-
             platform-tools
             platforms;android-36
+            build-tools;36.0.0
+            cmake;3.22.1
             ndk;27.3.13750724
 
       - name: Grant execute permission for Gradle wrapper
@@ -90,6 +92,9 @@ jobs:
             data/schemas/
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Compile and package instrumented tests
+        run: ./gradlew compileDebugAndroidTestKotlin assembleDebugAndroidTest --no-daemon --stacktrace
 
       - name: Run Android lint
         run: ./gradlew lintDebug --no-daemon --stacktrace

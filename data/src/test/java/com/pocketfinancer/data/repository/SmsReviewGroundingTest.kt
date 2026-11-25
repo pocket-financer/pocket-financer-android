@@ -10,7 +10,7 @@ class SmsReviewGroundingTest {
     private val source = "🔔 INR 1,250.00 debited from XX1234 at Café"
 
     @Test
-    fun `v4 proposal preserves scalar spans and immutable receipt time`() {
+    fun `grounded proposal preserves scalar spans and immutable receipt time`() {
         val proposal = SmsReviewGrounding.proposal(result(), source)!!
 
         assertEquals(125000, proposal.amountMinorUnits)

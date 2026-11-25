@@ -153,7 +153,7 @@ class SmsProcessingRecoveryDeviceTest {
             "diagnostic", UUID.randomUUID().toString(), now, "admitted"))
         val first = SmsProcessingOperationEntity(
             UUID.randomUUID().toString(), sourceId, null, eventId, "realtime",
-            "{}", SmsProcessingStore.sha256("{}"), "native-integration-v5",
+            "{}", SmsProcessingStore.sha256("{}"), "pocketfinancer.sms-pipeline/1",
             "ready", 0, null, 0, null, now, now, null, null, 0)
         store.createOperation(first)
         val claim = store.claim(first.id, now + 1)
@@ -201,7 +201,7 @@ class SmsProcessingRecoveryDeviceTest {
     }
 
     @Test fun newerReplayReviewSurvivesOlderClaimRecoveryAfterEncryptedReopen() = runBlocking {
-        val first = admitV5()
+        val first = admitAutomaticOperation()
         val firstClaim = store.claim(first.id, 1_001)
         val replay = first.copy(
             id = UUID.randomUUID().toString(),
@@ -225,8 +225,8 @@ class SmsProcessingRecoveryDeviceTest {
         assertEquals("retain_review", database.smsProcessingDao().getOperation(replay.id)?.state)
     }
 
-    @Test fun newerReplayReusesRecoveredV5ReviewAfterEncryptedReopen() = runBlocking {
-        val first = admitV5()
+    @Test fun newerReplayReusesRecoveredReviewAfterEncryptedReopen() = runBlocking {
+        val first = admitAutomaticOperation()
         val firstClaim = store.claim(first.id, 1_001)
         assertEquals(1, store.recoverExpiredOperations(firstClaim.expiresAt + 1))
         val recoveredReview = database.smsProcessingDao().getReviewCaseForOperation(first.id)!!
@@ -254,7 +254,7 @@ class SmsProcessingRecoveryDeviceTest {
     }
 
     @Test fun replayDoesNotOverwriteOwnerEditedReview() = runBlocking {
-        val first = admitV5()
+        val first = admitAutomaticOperation()
         val firstClaim = store.claim(first.id, 1_001)
         val firstReviewId = store.retainForReview(
             firstClaim, listOf("extractor_malformed_json"), 1_002)
@@ -287,13 +287,44 @@ class SmsProcessingRecoveryDeviceTest {
             database.smsProcessingDao().getReviewCase(replayReviewId)?.currentOperationId)
     }
 
+    @Test fun bodyFreeTombstonesSurviveEncryptedReopenWithoutRetainingRawBody() = runBlocking {
+        val excludedOp = admitAutomaticOperation()
+        val excludedClaim = store.claim(excludedOp.id, 1_001)
+        store.settleDiscarded(
+            excludedClaim,
+            "prefilter_otp_verification",
+            1_002,
+            SmsProcessingStore.RETENTION_TOMBSTONED_EXCLUDED
+        )
+        val noneOp = admitAutomaticOperation()
+        val noneClaim = store.claim(noneOp.id, 1_003)
+        store.settleDiscarded(
+            noneClaim,
+            "extractor_none",
+            1_004,
+            SmsProcessingStore.RETENTION_TOMBSTONED_NONE
+        )
+        database.close()
+        open()
+
+        val excludedSource = database.smsProcessingDao().getSource(excludedOp.sourceId)!!
+        assertEquals("", excludedSource.rawMessage)
+        assertEquals("", excludedSource.sender)
+        assertEquals(SmsProcessingStore.RETENTION_TOMBSTONED_EXCLUDED, excludedSource.retentionState)
+
+        val noneSource = database.smsProcessingDao().getSource(noneOp.sourceId)!!
+        assertEquals("", noneSource.rawMessage)
+        assertEquals("", noneSource.sender)
+        assertEquals(SmsProcessingStore.RETENTION_TOMBSTONED_NONE, noneSource.retentionState)
+    }
+
     private fun reviewCount(): Int =
         database.openHelper.readableDatabase.query("SELECT COUNT(*) FROM sms_review_cases").use {
             assertTrue(it.moveToFirst())
             it.getInt(0)
         }
 
-    private suspend fun admitV5(): SmsProcessingOperationEntity {
+    private suspend fun admitAutomaticOperation(): SmsProcessingOperationEntity {
         val sourceId = UUID.randomUUID().toString()
         store.admitSource(AdmittedSmsSourceEntity(
             sourceId, "synthetic", sourceId, null, SmsProcessingStore.sha256(sourceId),
@@ -302,7 +333,7 @@ class SmsProcessingRecoveryDeviceTest {
         return SmsProcessingOperationEntity(
             UUID.randomUUID().toString(), sourceId, null, UUID.randomUUID().toString(),
             "realtime", "{}", SmsProcessingStore.sha256("{}"),
-            "native-integration-v5", "admitted", 0, null, 0, null,
+            "pocketfinancer.sms-pipeline/1", "admitted", 0, null, 0, null,
             1_000, 1_000, null, null, 0
         ).also { store.createOperation(it) }
     }

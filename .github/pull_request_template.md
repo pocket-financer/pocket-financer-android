@@ -24,7 +24,7 @@ downstream compatibility. State the consistency boundary for runtime settings. -
 <!-- List exact tests, lint/build commands, emulator/device checks, and results. -->
 
 - [ ] Relevant automated tests added or updated
-- [ ] Affected module tests pass
+- [ ] Affected module tests and `androidTest` compilation pass
 - [ ] Appropriate lint/build check passes
 - [ ] Manual or emulator verification completed, or not applicable
 
@@ -41,10 +41,9 @@ when useful. -->
 
 ## Checklist
 
-- [ ] I read `AGENTS.md` and relevant current code before changing behavior
-- [ ] This PR is focused and targets `main` from a short-lived `codex/*` branch
-- [ ] The PR title is a valid Conventional Commit and describes the squash
-      commit
+- [ ] I read `AGENTS.md` and verified relevant code before changing behavior
+- [ ] This PR is focused and targets `main` from a short-lived `<type>/<short-description>` branch
+- [ ] The PR title is a valid Conventional Commit and describes the squash commit
 - [ ] Generated release files (`version.txt` and `CHANGELOG.md`) are untouched,
       unless this is the automated Release Please PR
-- [ ] No keystore, credentials, financial data, or other secrets are included
+- [ ] No keystore, credentials, real SMS/financial data, or other secrets are included

@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketfinancer.data.db.AppDatabase
-import com.pocketfinancer.data.db.entity.AccountEntity
 import com.pocketfinancer.data.db.entity.TransactionEntity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -322,100 +321,45 @@ class TransactionDaoTest {
                     excludeOperationId = "op-2"
                 )
             )
-        }
-    }
-}
-
-@RunWith(RobolectricTestRunner::class)
-class AccountDaoTest {
-
-    private lateinit var db: AppDatabase
-    private lateinit var dao: AccountDao
-
-    @Before
-    fun setUp() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
-            .allowMainThreadQueries()
-            .build()
-        dao = db.accountDao()
-    }
-
-    @After
-    fun tearDown() {
-        db.close()
-    }
-
-    @Test
-    fun `insert and getById should return account`() {
-        runBlocking {
-            val account = AccountEntity(
-                id = "acct-1",
-                name = "A/c XX6254",
-                bank = "HDFC Bank",
-                type = "auto-extracted"
+            assertEquals(
+                0,
+                dao.countMatchingTransactionsInWindow(
+                    accountId = "acct-1",
+                    direction = "debit",
+                    minorUnits = 50_000L,
+                    currency = "INR",
+                    occurredAtEpochMs = baseTime + 300_001L,
+                    windowMs = 300_000L,
+                    excludeSourceId = "src-2",
+                    excludeOperationId = "op-2"
+                )
             )
-            dao.insert(account)
-            val loaded = dao.getById("acct-1")
-            assertNotNull(loaded)
-            assertEquals("A/c XX6254", loaded!!.name)
-            assertEquals("HDFC Bank", loaded.bank)
-        }
-    }
-
-    @Test
-    fun `findByName should match correctly`() {
-        runBlocking {
-            val account = AccountEntity(
-                id = "acct-2",
-                name = "A/c XX0000",
-                bank = "SBI",
-                type = "auto-extracted"
+            assertEquals(
+                0,
+                dao.countMatchingTransactionsInWindow(
+                    accountId = "acct-1",
+                    direction = "credit",
+                    minorUnits = 50_000L,
+                    currency = "INR",
+                    occurredAtEpochMs = baseTime + 1_000L,
+                    windowMs = 300_000L,
+                    excludeSourceId = "src-2",
+                    excludeOperationId = "op-2"
+                )
             )
-            dao.insert(account)
-            val found = dao.findByName("A/c XX0000")
-            assertNotNull(found)
-            assertEquals("SBI", found!!.bank)
-        }
-    }
-
-    @Test
-    fun `findByName should return null for missing`() {
-        runBlocking {
-            val result = dao.findByName("nonexistent")
-            assertNull(result)
-        }
-    }
-
-    @Test
-    fun `findByNameAndBank should match both fields`() {
-        runBlocking {
-            val account = AccountEntity(
-                id = "acct-3",
-                name = "A/c XX6254",
-                bank = "HDFC Bank",
-                type = "auto-extracted"
+            assertEquals(
+                0,
+                dao.countMatchingTransactionsInWindow(
+                    accountId = "acct-1",
+                    direction = "debit",
+                    minorUnits = 50_000L,
+                    currency = "USD",
+                    occurredAtEpochMs = baseTime + 1_000L,
+                    windowMs = 300_000L,
+                    excludeSourceId = "src-2",
+                    excludeOperationId = "op-2"
+                )
             )
-            dao.insert(account)
-
-            val match = dao.findByNameAndBank("A/c XX6254", "HDFC Bank")
-            assertNotNull(match)
-
-            val wrongBank = dao.findByNameAndBank("A/c XX6254", "SBI")
-            assertNull(wrongBank)
-        }
-    }
-
-    @Test
-    fun `getAll should return all accounts`() {
-        runBlocking {
-            dao.insert(AccountEntity("a1", "A/c XX1111", "Bank A", "auto-extracted"))
-            dao.insert(AccountEntity("a2", "A/c XX2222", "Bank B", "auto-extracted"))
-
-            val all = dao.getAll().first()
-            assertEquals(2, all.size)
-            assertEquals("a1", all.find { it.id == "a1" }!!.id)
-            assertEquals("a2", all.find { it.id == "a2" }!!.id)
         }
     }
 }

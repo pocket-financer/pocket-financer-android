@@ -17,13 +17,16 @@ class GroundedAccountResolverTest {
     private val revisionDao = mockk<TransactionRevisionDao>()
     private val resolver = GroundedAccountResolver(accountDao, revisionDao)
 
-    @Test fun `masked suffix resolves only a confirmed owned alias with a live account`() = runTest {
+    @Test
+    fun `null alias returns Missing without touching persistence`() = runTest {
+        assertIs<GroundedAccountResolution.Missing>(resolver.resolve(null))
+        coVerify(exactly = 0) { revisionDao.findConfirmedAliases(any(), any()) }
+    }
+
+    @Test
+    fun `masked suffix resolves only a confirmed owned alias with a live account`() = runTest {
         val aliasHash = SmsProcessingStore.sha256("suffix:1234")
-        val alias = AccountAliasEntity(
-            id = "alias", accountId = "account", normalizedAliasHash = aliasHash,
-            aliasKind = "suffix", matchingScope = GroundedAccountResolver.MATCHING_SCOPE,
-            confirmedByUser = true, createdAt = 1L
-        )
+        val alias = aliasEntity("alias", "account", aliasHash, "suffix")
         coEvery {
             revisionDao.findConfirmedAliases(aliasHash, GroundedAccountResolver.MATCHING_SCOPE)
         } returns listOf(alias)
@@ -40,23 +43,52 @@ class GroundedAccountResolverTest {
         assertEquals("confirmed_owned_account_alias_v1", result.provenance)
     }
 
-    @Test fun `ambiguous source reference fails before alias lookup`() = runTest {
+    @Test
+    fun `VPA reference normalizes to canonical vpa key and resolves uniquely`() = runTest {
+        val aliasHash = SmsProcessingStore.sha256("vpa:owner.test@synthbank")
+        val alias = aliasEntity("alias-vpa", "account-vpa", aliasHash, "vpa")
+        coEvery {
+            revisionDao.findConfirmedAliases(aliasHash, GroundedAccountResolver.MATCHING_SCOPE)
+        } returns listOf(alias)
+        coEvery { accountDao.getById("account-vpa") } returns AccountEntity(
+            id = "account-vpa", name = "UPI Wallet", bank = "Synthetic Bank", type = "manual"
+        )
+
+        val result = assertIs<GroundedAccountResolution.UniquelyResolved>(
+            resolver.resolve("  OWNER.TEST@SYNTHBANK ")
+        )
+
+        assertEquals("account-vpa", result.accountId)
+        assertEquals(aliasHash, result.matchedAliasHash)
+    }
+
+    @Test
+    fun `ambiguous source reference fails before alias lookup`() = runTest {
         assertIs<GroundedAccountResolution.Unresolved>(
             resolver.resolve("accounts **1234 and **5678")
         )
+        assertIs<GroundedAccountResolution.Unresolved>(resolver.resolve("   "))
         coVerify(exactly = 0) { revisionDao.findConfirmedAliases(any(), any()) }
         coVerify(exactly = 0) { accountDao.getById(any()) }
     }
 
-    @Test fun `multiple live accounts for one confirmed alias are ambiguous`() = runTest {
+    @Test
+    fun `orphaned confirmed alias pointing to deleted account remains unresolved`() = runTest {
+        val aliasHash = SmsProcessingStore.sha256("suffix:9876")
+        val alias = aliasEntity("alias-orphan", "deleted-account", aliasHash, "suffix")
+        coEvery {
+            revisionDao.findConfirmedAliases(aliasHash, GroundedAccountResolver.MATCHING_SCOPE)
+        } returns listOf(alias)
+        coEvery { accountDao.getById("deleted-account") } returns null
+
+        assertIs<GroundedAccountResolution.Unresolved>(resolver.resolve("XX9876"))
+    }
+
+    @Test
+    fun `multiple live accounts for one confirmed alias are ambiguous and sorted`() = runTest {
         val aliasHash = SmsProcessingStore.sha256("suffix:1234")
-        val aliases = listOf("account-a", "account-b").map { accountId ->
-            AccountAliasEntity(
-                id = "alias-$accountId", accountId = accountId,
-                normalizedAliasHash = aliasHash, aliasKind = "suffix",
-                matchingScope = GroundedAccountResolver.MATCHING_SCOPE,
-                confirmedByUser = true, createdAt = 1L
-            )
+        val aliases = listOf("account-b", "account-a").map { accountId ->
+            aliasEntity("alias-$accountId", accountId, aliasHash, "suffix")
         }
         coEvery {
             revisionDao.findConfirmedAliases(aliasHash, GroundedAccountResolver.MATCHING_SCOPE)
@@ -73,4 +105,19 @@ class GroundedAccountResolverTest {
         )
         assertEquals(listOf("account-a", "account-b"), result.accountIds)
     }
+
+    private fun aliasEntity(
+        id: String,
+        accountId: String,
+        hash: String,
+        kind: String
+    ) = AccountAliasEntity(
+        id = id,
+        accountId = accountId,
+        normalizedAliasHash = hash,
+        aliasKind = kind,
+        matchingScope = GroundedAccountResolver.MATCHING_SCOPE,
+        confirmedByUser = true,
+        createdAt = 1L
+    )
 }

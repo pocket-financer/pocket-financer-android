@@ -36,6 +36,24 @@ class SmsAutomaticPersistenceTest {
     fun tearDown() = database.close()
 
     @Test
+    fun `eligible posted transaction persists atomically with revision and decision`() = runBlocking {
+        val claim = arrangeClaim()
+
+        val receipt = store.persistEligibleTransaction(claim, input(), NOW + 2)
+
+        assertEquals(transactionId(), receipt.transactionId)
+        assertEquals(1, database.transactionDao().count())
+        val saved = database.transactionDao().getById(receipt.transactionId)!!
+        assertEquals(1_000L, saved.exactMinorUnits)
+        assertEquals("INR", saved.currencyCode)
+        assertEquals("debit", saved.type)
+        assertEquals(ACCOUNT_ID, saved.accountId)
+        assertEquals(1, database.transactionRevisionDao().getHistory(saved.id).size)
+        assertEquals("persisted", database.smsProcessingDao().getOperation(OPERATION_ID)?.state)
+        assertEquals("persist", database.smsProcessingDao().getPersistenceDecision(OPERATION_ID)?.result)
+    }
+
+    @Test
     fun `failure before owner settlement rolls back every automatic write`() = runBlocking {
         val claim = arrangeClaim()
 
@@ -118,7 +136,7 @@ class SmsAutomaticPersistenceTest {
         if (parentOperationId == null) "manual" else "retry",
         "{}",
         configurationHash,
-        "native-integration-v5",
+        "pocketfinancer.sms-pipeline/1",
         "ready",
         0,
         null,

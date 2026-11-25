@@ -2,11 +2,18 @@ package com.pocketfinancer.ui.home
 
 import com.pocketfinancer.hardware.DeviceCapabilities
 import com.pocketfinancer.hardware.SlmTier
+import com.pocketfinancer.ui.onboarding.OnboardingStep
+import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import com.pocketfinancer.ui.onboarding.OnboardingSyncManager
 
 class ModelUpgradePolicyTest {
 
@@ -67,7 +74,6 @@ class ModelUpgradePolicyTest {
 
     @Test
     fun `downloaded target remains an upgrade until selection changes`() {
-        // Artifact presence is intentionally not an input to this policy.
         assertTrue(
             isHigherQualityModel(
                 current = SlmTier.DEFAULT_ONBOARDING_SLM,
@@ -94,6 +100,86 @@ class ModelUpgradePolicyTest {
             message
         )
     }
+
+    @Test
+    fun `active model upgrade can be cancelled while initial setup or completed runs cannot`() {
+        val activeUpgrade = OnboardingSyncManager.OnboardingSyncState(
+            isRunning = true,
+            isCancellationAllowed = true,
+            runPurpose = OnboardingSyncManager.RunPurpose.MODEL_UPGRADE
+        )
+        assertTrue(canCancelModelUpgrade(activeUpgrade))
+
+        val initialSetup = activeUpgrade.copy(
+            runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP
+        )
+        assertFalse(canCancelModelUpgrade(initialSetup))
+
+        val completedUpgrade = OnboardingSyncManager.OnboardingSyncState(
+            isRunning = false,
+            runPurpose = OnboardingSyncManager.RunPurpose.MODEL_UPGRADE,
+            step = OnboardingStep.COMPLETED
+        )
+        assertFalse(canCancelModelUpgrade(completedUpgrade))
+        assertNull(unfinishedModelUpgradeTarget(completedUpgrade))
+
+        val drainingUpgrade = OnboardingSyncManager.OnboardingSyncState(
+            isRunning = true,
+            isCancelling = true,
+            isCancellationAllowed = false,
+            runPurpose = OnboardingSyncManager.RunPurpose.MODEL_UPGRADE,
+            syncMessage = "Cancelling model upgrade..."
+        )
+        assertFalse(canCancelModelUpgrade(drainingUpgrade))
+    }
+
+    @Test
+    fun `cancelled upgrade keeps its target for resume while initial onboarding does not`() {
+        val target = SlmTier.QWEN3_1_7B_Q4_K_M
+        val cancelledUpgrade = OnboardingSyncManager.OnboardingSyncState(
+            isRunning = false,
+            runPurpose = OnboardingSyncManager.RunPurpose.MODEL_UPGRADE,
+            selectedSlm = target,
+            step = OnboardingStep.DOWNLOAD_SLM,
+            syncMessage = "Cancelled"
+        )
+        assertEquals(target, unfinishedModelUpgradeTarget(cancelledUpgrade))
+
+        val initialSetup = OnboardingSyncManager.OnboardingSyncState(
+            isRunning = false,
+            runPurpose = OnboardingSyncManager.RunPurpose.INITIAL_SETUP,
+            selectedSlm = SlmTier.DEFAULT_ONBOARDING_SLM,
+            step = OnboardingStep.DOWNLOAD_SLM
+        )
+        assertNull(unfinishedModelUpgradeTarget(initialSetup))
+    }
+
+    @Test
+    fun `session dismissal store scopes dismissals per instance and stays thread-safe`() =
+        runBlocking {
+            val session = ModelUpgradeSessionDismissalStore()
+            session.dismiss("model-a")
+            session.dismiss("model-a")
+
+            assertEquals(setOf("model-a"), session.dismissedTierIds.value)
+            assertFalse("model-b" in session.dismissedTierIds.value)
+            assertEquals(emptySet<String>(), ModelUpgradeSessionDismissalStore().dismissedTierIds.value)
+
+            val concurrent = ModelUpgradeSessionDismissalStore()
+            val targetIds = (0 until 512).map { "model-$it" }
+            val start = CompletableDeferred<Unit>()
+            val jobs = targetIds.map { targetId ->
+                launch(Dispatchers.Default) {
+                    start.await()
+                    concurrent.dismiss(targetId)
+                }
+            }
+
+            start.complete(Unit)
+            jobs.joinAll()
+
+            assertEquals(targetIds.toSet(), concurrent.dismissedTierIds.value)
+        }
 
     private fun device(
         ramGb: Float,
