@@ -2,6 +2,13 @@
 
 All notable changes to Pocket Financer are recorded here by Release Please.
 
+## [1.3.0](https://github.com/pocket-financer/pocket-financer-android/compare/v1.2.0...v1.3.0) (2026-11-25)
+
+
+### Features
+
+* consolidate SMS processing pipeline ([#53](https://github.com/pocket-financer/pocket-financer-android/issues/53)) ([59a8efb](https://github.com/pocket-financer/pocket-financer-android/commit/59a8efb7619c6ac3f88f192db1bb86d0e1baf62f))
+
 ## [1.2.0](https://github.com/ManishAradwad/pocket-financer-android/compare/v1.1.0...v1.2.0) (2026-08-14)
 
 
